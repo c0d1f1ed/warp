@@ -28,7 +28,7 @@ def fetch_prebuilt_libraries():
         else:
             packages = {
                 "aarch64": "15.0.7-linux-aarch64-gcc7.5",
-                "x86_64": "15.0.7-linux-x86_64-ptx-gcc7.5-cxx11abi0",
+                "x86_64": "18.1.3-linux-x86_64",
             }
 
     for arch in packages:
@@ -58,7 +58,7 @@ def build_from_source_for_arch(args, arch, llvm_source):
         print(f"Cloning LLVM project from {repo_url}...")
 
         shallow_clone = True  # https://github.blog/2020-12-21-get-up-to-speed-with-partial-clone-and-shallow-clone/
-        version = "15.0.7"
+        version = "18.1.3"
         if shallow_clone:
             repo = Repo.clone_from(
                 repo_url, to_path=llvm_source, single_branch=True, branch=f"llvmorg-{version}", depth=1
@@ -71,9 +71,11 @@ def build_from_source_for_arch(args, arch, llvm_source):
 
     # CMake supports Debug, Release, RelWithDebInfo, and MinSizeRel builds
     if args.mode == "release":
+        msvc_runtime = "MultiThreaded"
         # prefer smaller size over aggressive speed
         cmake_build_type = "MinSizeRel"
     else:
+        msvc_runtime = "MultiThreadedDebug"
         # When args.mode == "debug" we build a Debug version of warp.dll but
         # we generally don't want warp-clang.dll to be a slow Debug version.
         if args.debug_llvm:
@@ -114,10 +116,7 @@ def build_from_source_for_arch(args, arch, llvm_source):
         "-B", build_path,
         "-G", "Ninja",
         "-D", f"CMAKE_BUILD_TYPE={cmake_build_type}",
-        "-D", "LLVM_USE_CRT_RELEASE=MT",
-        "-D", "LLVM_USE_CRT_MINSIZEREL=MT",
-        "-D", "LLVM_USE_CRT_DEBUG=MTd",
-        "-D", "LLVM_USE_CRT_RELWITHDEBINFO=MTd",
+        "-D", f"CMAKE_MSVC_RUNTIME_LIBRARY={msvc_runtime}",
         "-D", f"LLVM_TARGETS_TO_BUILD={target_backend};NVPTX",
         "-D", "LLVM_ENABLE_PROJECTS=clang",
         "-D", "LLVM_ENABLE_ZLIB=FALSE",
@@ -312,13 +311,20 @@ def build_warp_clang_for_arch(args, lib_name, arch):
 
         clang_dll_path = os.path.join(build_path, f"bin/{lib_name}")
 
+        if not args.build_llvm:
+            try:
+                # obtain Clang and LLVM libraries from packman
+                fetch_prebuilt_libraries()
+            except Exception as e:
+                print("Failed to download pre-built LLVM libraries: " + str(e))
+                args.build_llvm = True  # fall back to building LLVM from source
+                build_from_source(args)
+
         if args.build_llvm:
             # obtain Clang and LLVM libraries from the local build
             install_path = os.path.join(llvm_install_path, f"{args.mode}-{arch}")
             libpath = os.path.join(install_path, "lib")
         else:
-            # obtain Clang and LLVM libraries from packman
-            fetch_prebuilt_libraries()
             libpath = os.path.join(base_path, f"_build/host-deps/llvm-project/release-{arch}/lib")
 
         libs = []
@@ -329,6 +335,7 @@ def build_warp_clang_for_arch(args, lib_name, arch):
 
         if os.name == "nt":
             libs.append("Version.lib")
+            libs.append("Ws2_32.lib")
             libs.append(f'/LIBPATH:"{libpath}"')
         else:
             libs = [f"-l{lib[3:-2]}" for lib in libs if os.path.splitext(lib)[1] == ".a"]
