@@ -152,10 +152,6 @@ def values_check_equal(a, b):
     return a == b
 
 
-def op_str_is_chainable(op: str) -> builtins.bool:
-    return op in comparison_chain_strings
-
-
 def get_closure_cell_contents(obj):
     """Retrieve a closure's cell contents or `None` if it's empty."""
     try:
@@ -1435,8 +1431,7 @@ class Adjoint:
         prev_comp_var = None
 
         for op, comp in zip(op_strings, comps):
-            comp_chainable = op_str_is_chainable(op)
-            if comp_chainable and prev_comp_var:
+            if prev_comp_var:
                 # We restrict chaining to operands of the same type
                 if prev_comp_var.type is comp.type:
                     prev_comp_var = adj.load(prev_comp_var)
