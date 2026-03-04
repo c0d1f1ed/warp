@@ -1353,7 +1353,7 @@ class TestConstantPrecision(unittest.TestCase):
 
     def test_scalar_infer_type_empty_raises(self):
         """scalar_infer_type raises RuntimeError (not StopIteration) when no scalar types found."""
-        from warp._src.builtins import scalar_infer_type
+        from warp._src.builtins import scalar_infer_type  # noqa: PLC0415
 
         # str is not a scalar type, not a compound type, not a float
         with self.assertRaises(RuntimeError):

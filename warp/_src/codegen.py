@@ -1541,11 +1541,6 @@ class Adjoint:
         if line_directive := adj.get_line_directive(statement, adj.lineno):
             adj.blocks[-1].body_reverse.append(line_directive)
 
-    @staticmethod
-    def _is_numeric_literal(node):
-        """Check if an AST node is a numeric literal constant (int or float)."""
-        return isinstance(node, ast.Constant) and isinstance(node.value, (int, float))
-
     def add_constant(adj, n, target_type=None):
         """Add a constant variable with optional type override for precision preservation.
 
@@ -1915,15 +1910,6 @@ class Adjoint:
         return output
 
     @staticmethod
-    def _float_types_compatible(a, b):
-        """True if *a* and *b* are compatible via weak float typing.
-
-        Returns True when one type is weakly-typed float and the other is
-        strongly-typed float — meaning assignment between them is allowed.
-        """
-        return (is_weak_float(a) and is_strong_float(b)) or (is_weak_float(b) and is_strong_float(a))
-
-    @staticmethod
     def _resolve_float_target(bound_args):
         """Find the target float precision from strongly-typed arguments.
 
@@ -1982,6 +1968,25 @@ class Adjoint:
             alias = Var(arg.label, type=float64)
             return adj.add_builtin_call(target_type.__name__, [alias])
         return adj.add_builtin_call(target_type.__name__, [arg])
+
+    def _reconcile_symbol_type(adj, name, rhs, existing_type):
+        """Cast or validate *rhs* when reassigning to an existing symbol.
+
+        Handles weak-to-strong float casting, strong-to-weak upgrades, and
+        raises WarpCodegenTypeError for genuinely incompatible types.
+
+        Returns the (possibly cast) rhs value.
+        """
+        rhs_type = strip_reference(rhs.type)
+        if types_equal(rhs_type, existing_type):
+            return rhs
+        if is_weak_float(rhs_type) and is_strong_float(existing_type):
+            return adj._cast_to(rhs, existing_type)
+        if is_weak_float(existing_type) and is_strong_float(rhs_type):
+            return rhs  # Existing var was weakly typed, now strongly typed
+        raise WarpCodegenTypeError(
+            f"Error, assigning to existing symbol {name} ({existing_type}) with different type ({rhs_type})"
+        )
 
     def add_builtin_call(adj, func_name, args, min_outputs=None):
         func = warp._src.context.builtin_functions[func_name]
@@ -3542,20 +3547,10 @@ class Adjoint:
                 )
 
             out = rhs
-            for name, rhs in zip(names, out):
-                if name in adj.symbols:
-                    existing_type = adj.symbols[name].type
-                    if not types_equal(rhs.type, existing_type):
-                        if is_weak_float(rhs.type) and is_strong_float(existing_type):
-                            rhs = adj._cast_to(rhs, existing_type)
-                        elif is_weak_float(existing_type) and is_strong_float(rhs.type):
-                            pass  # Existing var was weakly typed, now strongly typed
-                        else:
-                            raise WarpCodegenTypeError(
-                                f"Error, assigning to existing symbol {name} ({existing_type}) with different type ({rhs.type})"
-                            )
-
-                adj.symbols[name] = rhs
+            for name, val in zip(names, out):
+                adj.symbols[name] = (
+                    adj._reconcile_symbol_type(name, val, adj.symbols[name].type) if name in adj.symbols else val
+                )
 
         # handles the case where we are assigning to an array index (e.g.: arr[i] = 2.0)
         elif isinstance(lhs, ast.Subscript):
@@ -3642,18 +3637,7 @@ class Adjoint:
 
             # check type matches if symbol already defined
             if name in adj.symbols:
-                existing_type = adj.symbols[name].type
-                rhs_type = strip_reference(rhs.type)
-                if not types_equal(rhs_type, existing_type):
-                    # Auto-cast weakly-typed float reassignment
-                    if is_weak_float(rhs_type) and is_strong_float(existing_type):
-                        rhs = adj._cast_to(rhs, existing_type)
-                    elif is_weak_float(existing_type) and is_strong_float(rhs_type):
-                        pass  # Existing var was weakly typed, now strongly typed
-                    else:
-                        raise WarpCodegenTypeError(
-                            f"Error, assigning to existing symbol {name} ({existing_type}) with different type ({rhs.type})"
-                        )
+                rhs = adj._reconcile_symbol_type(name, rhs, adj.symbols[name].type)
 
             if isinstance(node.value, ast.Tuple):
                 out = rhs
@@ -3823,18 +3807,7 @@ class Adjoint:
 
             # Validate type consistency (same as emit_Assign for Name targets).
             if lhs.id in adj.symbols:
-                existing_type = adj.symbols[lhs.id].type
-                result_type = strip_reference(result.type)
-                if not types_equal(result_type, existing_type):
-                    if is_weak_float(result_type) and is_strong_float(existing_type):
-                        result = adj._cast_to(result, existing_type)
-                    elif is_weak_float(existing_type) and is_strong_float(result_type):
-                        pass  # Existing var was weakly typed, now strongly typed
-                    else:
-                        raise WarpCodegenTypeError(
-                            f"Error, augmented assignment to `{lhs.id}` ({existing_type}) "
-                            f"produces different type ({result_type})"
-                        )
+                result = adj._reconcile_symbol_type(lhs.id, result, adj.symbols[lhs.id].type)
 
             adj.symbols[lhs.id] = result
             return
