@@ -1558,9 +1558,6 @@ class Adjoint:
                 n = float(n)
         else:
             var_type = get_arg_type(n)
-            # Convert int literals to int32 early — int is not weakly typed (unlike float).
-            if var_type is int:
-                var_type = int32
 
         return adj.add_var(type=var_type, constant=n)
 
@@ -1581,10 +1578,10 @@ class Adjoint:
             comp_chainable = op_str_is_chainable(op)
             casted_comp = comp
             if comp_chainable and prev_comp_var:
-                # Cast weakly-typed float to match strongly-typed float (GH-485)
-                if is_weak_float(prev_comp_var.type) and is_strong_float(comp.type):
+                # Cast weakly-typed to match strongly-typed (GH-485)
+                if adj._weak_can_cast_to(prev_comp_var.type, comp.type):
                     prev_comp_var = adj._cast_to(prev_comp_var, comp.type)
-                elif is_weak_float(comp.type) and is_strong_float(prev_comp_var.type):
+                elif adj._weak_can_cast_to(comp.type, prev_comp_var.type):
                     casted_comp = adj._cast_to(comp, prev_comp_var.type)
 
                 # We restrict chaining to operands of the same type
@@ -1666,14 +1663,26 @@ class Adjoint:
         )
 
     def add_call(adj, func, args, kwargs, type_args, min_outputs=None):
-        # User functions have annotated float → float32 params, so cast
-        # weakly-typed float args to float32 before resolution (GH-485).
+        # User functions have annotated float → float32 and int → int32 params,
+        # so cast weakly-typed args and kwargs before resolution (GH-485).
         if not func.is_builtin():
-            if any(is_weak_float(get_arg_type(a)) for a in args):
-                args = tuple(adj._cast_to(a, float32) if is_weak_float(get_arg_type(a)) else a for a in args)
-            if any(is_weak_float(get_arg_type(v)) for v in kwargs.values()):
+            if any(is_weak_type(get_arg_type(a)) for a in args):
+                args = tuple(
+                    adj._cast_to(a, float32)
+                    if is_weak_float(get_arg_type(a))
+                    else adj._cast_to(a, int32)
+                    if is_weak_int(get_arg_type(a))
+                    else a
+                    for a in args
+                )
+            if any(is_weak_type(get_arg_type(v)) for v in kwargs.values()):
                 kwargs = {
-                    k: adj._cast_to(v, float32) if is_weak_float(get_arg_type(v)) else v for k, v in kwargs.items()
+                    k: adj._cast_to(v, float32)
+                    if is_weak_float(get_arg_type(v))
+                    else adj._cast_to(v, int32)
+                    if is_weak_int(get_arg_type(v))
+                    else v
+                    for k, v in kwargs.items()
                 }
 
         # Extract the types and values passed as arguments to the function call.
@@ -1683,19 +1692,26 @@ class Adjoint:
         try:
             func = adj.resolve_func(func, arg_types, kwarg_types, min_outputs)
         except WarpCodegenOverloadError:
-            # If resolution fails and there are weakly-typed float args, cast them
-            # to float32 and retry. This handles builtins with only concrete overloads
-            # (e.g., expect_eq) that don't have generic Float/Scalar overloads.
-            has_float_args = any(is_weak_float(t) for t in arg_types)
-            has_float_kwargs = any(is_weak_float(t) for t in kwarg_types.values())
-            if has_float_args or has_float_kwargs:
-                if has_float_args:
-                    args = tuple(adj._cast_to(a, float32) if is_weak_float(get_arg_type(a)) else a for a in args)
+            # If resolution fails and there are weakly-typed args, cast them
+            # to float32/int32 and retry. This handles builtins with only concrete
+            # overloads (e.g., expect_eq) that don't have generic type overloads.
+            has_weak_args = any(is_weak_type(t) for t in arg_types)
+            has_weak_kwargs = any(is_weak_type(t) for t in kwarg_types.values())
+            if has_weak_args or has_weak_kwargs:
+
+                def _default_cast(a):
+                    t = get_arg_type(a)
+                    if is_weak_float(t):
+                        return adj._cast_to(a, float32)
+                    if is_weak_int(t):
+                        return adj._cast_to(a, int32)
+                    return a
+
+                if has_weak_args:
+                    args = tuple(_default_cast(a) for a in args)
                     arg_types = tuple(get_arg_type(x) for x in args)
-                if has_float_kwargs:
-                    kwargs = {
-                        k: adj._cast_to(v, float32) if is_weak_float(get_arg_type(v)) else v for k, v in kwargs.items()
-                    }
+                if has_weak_kwargs:
+                    kwargs = {k: _default_cast(v) for k, v in kwargs.items()}
                     kwarg_types = {k: get_arg_type(v) for k, v in kwargs.items()}
                 func = adj.resolve_func(func, arg_types, kwarg_types, min_outputs)
             else:
@@ -1763,22 +1779,43 @@ class Adjoint:
                 if func.custom_replay_func:
                     adj.builder.deferred_functions.append(func.custom_replay_func)
 
-        # Cast weakly-typed float args to match the strongest typed float in the call.
-        # When all args are weakly typed, skip — they stay as C++ double for precision.
-        float_target = adj._resolve_float_target(bound_args)
-        if float_target is not None:
+        # Cast weakly-typed args to match strongly-typed targets in the call.
+        # When all args are weakly typed, skip — they stay as C++ double/int64.
+        float_target, int_target = adj._resolve_weak_type_target(bound_args)
+        if float_target is not None or int_target is not None:
 
             def _cast_val(val):
-                if isinstance(val, Var) and is_weak_float(get_arg_type(val)):
-                    return adj._cast_to(val, float_target)
+                if isinstance(val, Var):
+                    val_type = get_arg_type(val)
+                    if is_weak_float(val_type) and float_target is not None:
+                        return adj._cast_to(val, float_target)
+                    if is_weak_int(val_type) and int_target is not None:
+                        return adj._cast_to(val, int_target)
                 if isinstance(val, tuple):
-                    return tuple(
-                        adj._cast_to(x, float_target) if isinstance(x, Var) and is_weak_float(get_arg_type(x)) else x
-                        for x in val
-                    )
+                    return tuple(_cast_val(x) if isinstance(x, Var) else x for x in val)
                 return val
 
             bound_args = {k: _cast_val(v) for k, v in bound_args.items()}
+
+        # Cast remaining weak ints to int32. Weak ints that weren't matched to
+        # a strong int target still need concrete types in C++ (e.g., vector indices
+        # expect int32, not int64).  Weak floats are left as-is — they emit as C++
+        # double for maximum precision in literal-only expressions.
+        if func.is_builtin():
+
+            def _cast_weak_int_default(val):
+                if isinstance(val, Var) and is_weak_int(get_arg_type(val)):
+                    return adj._cast_to(val, int32)
+                if isinstance(val, tuple):
+                    return tuple(_cast_weak_int_default(x) if isinstance(x, Var) else x for x in val)
+                return val
+
+            if any(
+                (isinstance(v, Var) and is_weak_int(get_arg_type(v)))
+                or (isinstance(v, tuple) and any(isinstance(x, Var) and is_weak_int(get_arg_type(x)) for x in v))
+                for v in bound_args.values()
+            ):
+                bound_args = {k: _cast_weak_int_default(v) for k, v in bound_args.items()}
 
         # Resolve the return value based on the types and values of the given arguments.
         bound_arg_types = {k: get_arg_type(v) for k, v in bound_args.items()}
@@ -1918,12 +1955,49 @@ class Adjoint:
         return output
 
     @staticmethod
-    def _resolve_float_target(bound_args):
-        """Find the target float precision from strongly-typed arguments.
+    def _weak_can_cast_to(weak_type, strong_type):
+        """True if *weak_type* can be cast to *strong_type*.
 
-        Checks (in order): direct scalar type, compound scalar type
+        Valid casts: weak float → strong float, weak int → strong int,
+        weak int → strong float (int-to-float promotion).
+        NOT valid: weak float → strong int (lossy truncation).
+        """
+        if is_weak_float(weak_type):
+            return is_strong_float(strong_type)
+        if is_weak_int(weak_type):
+            return is_strong_int(strong_type) or is_strong_float(strong_type)
+        return False
+
+    @staticmethod
+    def _weak_types_compatible(a, b):
+        """True if *a* and *b* are compatible via weak typing.
+
+        Returns True when one type is weakly typed and the other is a compatible
+        strongly-typed type — meaning assignment between them is allowed.
+        """
+        return Adjoint._weak_can_cast_to(a, b) or Adjoint._weak_can_cast_to(b, a)
+
+    @staticmethod
+    def _extract_scalar_type(var_type):
+        """Extract the scalar type from a Warp type (direct, compound, or array)."""
+        if var_type in scalar_types:
+            return var_type
+        scalar = getattr(var_type, "_wp_scalar_type_", None)
+        if scalar in scalar_types:
+            return scalar
+        elem = getattr(var_type, "dtype", None)
+        if elem in scalar_types:
+            return elem
+        return None
+
+    @staticmethod
+    def _resolve_weak_type_target(bound_args):
+        """Find the target scalar type from strongly-typed arguments.
+
+        Returns a (float_target, int_target) tuple.  Either may be None.
+        Checks direct scalar type, compound scalar type
         (``_wp_scalar_type_``), array/tile dtype, then the ``dtype`` keyword
-        argument.  Returns None when all arguments are weakly typed.
+        argument.  Returns (None, None) when all arguments are weakly typed.
         """
 
         def _iter_vars(args):
@@ -1935,21 +2009,23 @@ class Adjoint:
                     yield from (x for x in var if isinstance(x, Var))
 
         strong_floats = set()
+        strong_ints = set()
         for var in _iter_vars(bound_args):
             var_type = get_arg_type(var)
-            if is_strong_float(var_type):
-                strong_floats.add(var_type)
-                continue
-            scalar_type = getattr(var_type, "_wp_scalar_type_", None)
-            if is_strong_float(scalar_type):
-                strong_floats.add(scalar_type)
-                continue
-            elem_dtype = getattr(var_type, "dtype", None)
-            if is_strong_float(elem_dtype):
-                strong_floats.add(elem_dtype)
+            scalar = Adjoint._extract_scalar_type(var_type)
+            if is_strong_float(scalar):
+                strong_floats.add(scalar)
+            elif is_strong_int(scalar):
+                strong_ints.add(scalar)
 
-        if strong_floats:
-            return widest_float_type(strong_floats)
+        float_target = widest_float_type(strong_floats) if strong_floats else None
+        int_target = None
+        if strong_ints:
+            # Pick the widest strong int type by byte size, preferring signed
+            int_target = max(strong_ints, key=lambda t: (type_size_in_bytes(t), not t.__name__.startswith("u")))
+
+        if float_target is not None or int_target is not None:
+            return float_target, int_target
 
         # Check the dtype keyword argument as a last resort
         dtype_kwarg = bound_args.get("dtype")
@@ -1958,29 +2034,39 @@ class Adjoint:
             if isinstance(dtype_value, type):
                 dtype_canonical = warp._src.types.canonicalize_dtype(dtype_value)
                 if is_strong_float(dtype_canonical):
-                    return dtype_canonical
+                    return dtype_canonical, None
+                if is_strong_int(dtype_canonical):
+                    return None, dtype_canonical
 
-        return None
+        return None, None
 
     def _cast_to(adj, arg, target_type):
-        """Cast weakly-typed float or other arg to *target_type*.
+        """Cast weakly-typed arg to *target_type*.
 
         For constants with known values, creates a new constant at the target
-        precision.  For computed values, aliases as float64 (weakly-typed float
-        emits as C++ ``double``) and applies a scalar cast builtin.
+        precision.  For computed values, aliases as float64/int64 (weakly-typed
+        float/int emit as C++ ``double``/``int64``) and applies a scalar cast
+        builtin.
         """
-        if is_weak_float(get_arg_type(arg)):
+        arg_type = get_arg_type(arg)
+        if is_weak_float(arg_type):
             if getattr(arg, "constant", None) is not None:
                 return adj.add_constant(arg.constant, target_type=target_type)
             # Weakly-typed float emits as C++ double. Alias as float64 for cast resolution.
             alias = Var(arg.label, type=float64)
+            return adj.add_builtin_call(target_type.__name__, [alias])
+        if is_weak_int(arg_type):
+            if getattr(arg, "constant", None) is not None:
+                return adj.add_constant(arg.constant, target_type=target_type)
+            # Weakly-typed int emits as C++ int64. Alias for cast resolution.
+            alias = Var(arg.label, type=int64)
             return adj.add_builtin_call(target_type.__name__, [alias])
         return adj.add_builtin_call(target_type.__name__, [arg])
 
     def _reconcile_symbol_type(adj, name, rhs, existing_type):
         """Cast or validate *rhs* when reassigning to an existing symbol.
 
-        Handles weak-to-strong float casting, strong-to-weak upgrades, and
+        Handles weak-to-strong casting, strong-to-weak upgrades, and
         raises WarpCodegenTypeError for genuinely incompatible types.
 
         Returns the (possibly cast) rhs value.
@@ -1988,9 +2074,9 @@ class Adjoint:
         rhs_type = strip_reference(rhs.type)
         if types_equal(rhs_type, existing_type):
             return rhs
-        if is_weak_float(rhs_type) and is_strong_float(existing_type):
+        if adj._weak_can_cast_to(rhs_type, existing_type):
             return adj._cast_to(rhs, existing_type)
-        if is_weak_float(existing_type) and is_strong_float(rhs_type):
+        if adj._weak_can_cast_to(existing_type, rhs_type):
             return rhs  # Existing var was weakly typed, now strongly typed
         raise WarpCodegenTypeError(
             f"Error, assigning to existing symbol {name} ({existing_type}) with different type ({rhs_type})"
@@ -1999,7 +2085,7 @@ class Adjoint:
     def add_builtin_call(adj, func_name, args, min_outputs=None):
         func = warp._src.context.builtin_functions[func_name]
 
-        # --- Weak typing: cast float precision mismatches before dispatch ---
+        # --- Weak typing: cast type mismatches before dispatch ---
 
         # Binary operations: cast scalar to match compound type's scalar precision
         if func.sametypes and len(args) == 2:
@@ -2019,49 +2105,49 @@ class Adjoint:
 
             if compound_scalar_type is not None and scalar_arg_index is not None:
                 scalar_type = get_arg_type(args[scalar_arg_index])
-                if is_weak_float(scalar_type) and is_strong_float(compound_scalar_type):
+                if adj._weak_can_cast_to(scalar_type, compound_scalar_type):
                     casted = adj._cast_to(args[scalar_arg_index], compound_scalar_type)
                     args = list(args)
                     args[scalar_arg_index] = casted
                     args = tuple(args)
 
-        # Store/array_store: cast weakly-typed float value to match target type
+        # Store/array_store: cast weakly-typed value to match target type
         if func_name == "store" and len(args) == 2:
             addr_type = get_arg_type(args[0])
             elem_type = addr_type.value_type if is_reference(addr_type) else addr_type
             val_type = get_arg_type(args[1])
-            if is_weak_float(val_type) and is_strong_float(elem_type):
+            if adj._weak_can_cast_to(val_type, elem_type):
                 args = (args[0], adj._cast_to(args[1], elem_type))
         if func_name in ("array_store", "atomic_add", "atomic_sub", "atomic_min", "atomic_max") and len(args) >= 2:
             arr_type = get_arg_type(args[0])
             if hasattr(arr_type, "dtype"):
                 elem_type = arr_type.dtype
                 val_type = get_arg_type(args[-1])
-                if is_weak_float(val_type) and is_strong_float(elem_type):
+                if adj._weak_can_cast_to(val_type, elem_type):
                     args = (*args[:-1], adj._cast_to(args[-1], elem_type))
-        # assign_inplace/assign_copy: cast weakly-typed float to match target's scalar type
+        # assign_inplace/assign_copy: cast weakly-typed value to match target's scalar type
         if func_name in ("assign_inplace", "assign_copy") and len(args) >= 3:
             target_type = get_arg_type(args[0])
             scalar_type = getattr(target_type, "_wp_scalar_type_", None)
             val_type = get_arg_type(args[-1])
-            if is_weak_float(val_type) and is_strong_float(scalar_type):
+            if adj._weak_can_cast_to(val_type, scalar_type):
                 args = (*args[:-1], adj._cast_to(args[-1], scalar_type))
 
-        # Where (ternary): cast weakly-typed float branches to match strongly-typed ones
+        # Where (ternary): cast weakly-typed branches to match strongly-typed ones
         if func_name == "where" and len(args) == 3:
             true_type = get_arg_type(args[1])
             false_type = get_arg_type(args[2])
-            if true_type is not false_type and (is_weak_float(true_type) or is_weak_float(false_type)):
-                if is_strong_float(true_type):
-                    float_target = true_type
-                elif is_strong_float(false_type):
-                    float_target = false_type
-                else:
-                    float_target = None
-                if float_target is not None:
+            if true_type is not false_type and (is_weak_type(true_type) or is_weak_type(false_type)):
+                # Find the strong target type from either branch
+                target = None
+                for t in (true_type, false_type):
+                    if is_strong_float(t) or is_strong_int(t):
+                        target = t
+                        break
+                if target is not None:
                     cond = args[0]
-                    t_val = adj._cast_to(args[1], float_target) if is_weak_float(true_type) else args[1]
-                    f_val = adj._cast_to(args[2], float_target) if is_weak_float(false_type) else args[2]
+                    t_val = adj._cast_to(args[1], target) if adj._weak_can_cast_to(true_type, target) else args[1]
+                    f_val = adj._cast_to(args[2], target) if adj._weak_can_cast_to(false_type, target) else args[2]
                     args = (cond, t_val, f_val)
 
         # --- End weak typing ---
@@ -3301,28 +3387,28 @@ class Adjoint:
                 args.append(adj.add_constant(x.value, target_type=target_type))
             else:
                 arg = adj.resolve_arg(x)
-                # Cast weakly-typed float args to match constructor's target type
-                if target_type is not None and is_weak_float(get_arg_type(arg)):
+                # Cast weakly-typed args to match constructor's target type
+                if target_type is not None and is_weak_type(get_arg_type(arg)):
                     arg = adj._cast_to(arg, target_type)
                 args.append(arg)
 
         # Evaluate keyword arguments.
         kwargs = {x.arg: adj.resolve_arg(x.value) for x in node.keywords}
 
-        # For compound constructors, cast weakly-typed float and int args to the target dtype.
+        # For compound constructors, cast weakly-typed and strong int args to the target dtype.
         if func and func.key in ("vector", "matrix", "quaternion", "transformation"):
             # Convert Python builtins in dtype kwarg (float→float32, int→int32)
             if "dtype" in kwargs and kwargs["dtype"] in (float, int):
                 kwargs["dtype"] = canonicalize_dtype(kwargs["dtype"])
             cast_target = kwargs.get("dtype")
-            if not cast_target and is_strong_float(target_type):
+            if not cast_target and (is_strong_float(target_type) or is_strong_int(target_type)):
                 cast_target = target_type
 
-            if is_strong_float(cast_target):
+            if is_strong_float(cast_target) or is_strong_int(cast_target):
                 casted_args = []
                 for arg in args:
                     arg_type = get_arg_type(arg)
-                    if is_weak_float(arg_type) or arg_type in int_types:
+                    if is_weak_type(arg_type) or (is_strong_float(cast_target) and arg_type in int_types):
                         casted_args.append(adj._cast_to(arg, cast_target))
                     else:
                         casted_args.append(arg)
@@ -3728,25 +3814,26 @@ class Adjoint:
                 var = (var,)
 
         if adj.return_var is not None:
-            # Cast weakly-typed float returns to match previous return's types
+            # Cast weakly-typed returns to match previous return's types
             if len(var) == len(adj.return_var):
                 var = tuple(
                     adj._cast_to(v, adj.return_var[i].type)
-                    if is_weak_float(v.type) and is_strong_float(adj.return_var[i].type)
+                    if adj._weak_can_cast_to(v.type, adj.return_var[i].type)
                     else v
                     for i, v in enumerate(var)
                 )
             old_ctypes = tuple(v.ctype(value_type=True) for v in adj.return_var)
             new_ctypes = tuple(v.ctype(value_type=True) for v in var)
             if old_ctypes != new_ctypes:
-                # Check if the mismatch is just weak float vs strongly-typed float — if so,
-                # the first return was weak float (C++ double). Re-type it to match.
+                # Check if the mismatch is just weak type vs strongly typed — if so,
+                # the first return was weakly typed. Re-type it to match.
+                weak_ctypes = {"double", "wp::int64"}
                 if len(old_ctypes) == len(new_ctypes) and all(
-                    (oc == nc) or (oc == "double" and nc in ("wp::float32", "wp::float64", "wp::float16"))
+                    (oc == nc) or (oc in weak_ctypes and nc.startswith("wp::"))
                     for oc, nc in zip(old_ctypes, new_ctypes)
                 ):
                     adj.return_var = tuple(
-                        Var(v.label, type=var[i].type) if is_weak_float(v.type) and is_strong_float(var[i].type) else v
+                        Var(v.label, type=var[i].type) if adj._weak_can_cast_to(v.type, var[i].type) else v
                         for i, v in enumerate(adj.return_var)
                     )
                 else:
@@ -3755,19 +3842,25 @@ class Adjoint:
                     )
 
         if var is not None:
-            # Cast weakly-typed float returns to match the annotated return type
+            # Cast weakly-typed returns to match the annotated return type
             if "return" in adj.arg_types:
                 ann_ret = adj.arg_types["return"]
                 ann_types = get_args(ann_ret) if get_origin(ann_ret) is tuple else (ann_ret,)
                 if len(ann_types) == len(var):
                     var = tuple(
-                        adj._cast_to(v, at) if is_weak_float(v.type) and is_strong_float(at) else v
-                        for v, at in zip(var, ann_types)
+                        adj._cast_to(v, at) if adj._weak_can_cast_to(v.type, at) else v for v, at in zip(var, ann_types)
                     )
 
-            # When no return annotation, cast weakly-typed float to float32
+            # When no return annotation, cast weakly-typed to defaults
             if "return" not in adj.arg_types:
-                var = tuple(adj._cast_to(v, float32) if is_weak_float(v.type) else v for v in var)
+                var = tuple(
+                    adj._cast_to(v, float32)
+                    if is_weak_float(v.type)
+                    else adj._cast_to(v, int32)
+                    if is_weak_int(v.type)
+                    else v
+                    for v in var
+                )
 
             adj.return_var = ()
             for ret in var:
