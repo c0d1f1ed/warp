@@ -51,6 +51,11 @@
   Supported on `Grid2D`, `Grid3D`, and `Nanogrid` geometries ([GH-1208](https://github.com/NVIDIA/warp/issues/1208)).
 - Add `--no-cuda` flag to `build_lib.py` for explicit CPU-only builds, skipping CUDA toolkit
   detection and `.cu` compilation ([GH-1223](https://github.com/NVIDIA/warp/issues/1223)).
+- Add weak typing for float literal constants in kernels. Float literals now automatically adapt
+  their precision to match the surrounding context (e.g., `wp.float64(3.141592653589793)` preserves
+  full double precision, `float32_var * 1.0` keeps the literal as `float32`). Literal-only
+  expressions like `1.0 + 2.0` are computed in `float64` for accuracy, then narrowed when combined
+  with a typed variable ([GH-485](https://github.com/NVIDIA/warp/issues/485)).
 
 ### Removed
 
