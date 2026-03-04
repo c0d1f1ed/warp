@@ -767,7 +767,7 @@ class Var:
         # convert built-in types to wp types
         if type == float and constant is None:
             type = float32
-        elif type == int:
+        elif type == int and constant is None:
             type = int32
         elif type == builtins.bool:
             type = bool
@@ -800,11 +800,14 @@ class Var:
             return t.native_name
         elif hasattr(t, "_wp_native_name_"):
             return f"wp::{t._wp_native_name_}"
-        elif t.__name__ in ("bool", "int"):
+        elif t.__name__ == "bool":
             return t.__name__
         elif is_weak_float(t):
             # Weakly-typed float emits as C++ double for maximum precision.
             return "double"
+        elif is_weak_int(t):
+            # Weakly-typed int emits as C++ int64 for maximum range.
+            return "wp::int64"
 
         return f"wp::{t.__name__}"
 

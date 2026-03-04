@@ -373,6 +373,21 @@ def is_strong_float(t: type) -> builtins.bool:
     return t in float_types
 
 
+def is_weak_int(t: type) -> builtins.bool:
+    """True if *t* is a weakly-typed Python int (adapts precision to context)."""
+    return t is int
+
+
+def is_weak_type(t: type) -> builtins.bool:
+    """True if *t* is any weakly-typed Python type (float or int)."""
+    return t is float or t is int
+
+
+def is_strong_int(t: type) -> builtins.bool:
+    """True if *t* is a strongly-typed Warp integer type."""
+    return t in int_types
+
+
 scalar_types = int_types + float_types
 scalar_and_bool_types = (*scalar_types, bool)
 
@@ -2586,31 +2601,27 @@ def is_slice(x) -> builtins.bool:
 
 
 def scalars_equal_generic(a, b, match_generic=True):
-    # Convert int/bool to canonical Warp types.
-    # Note: Python's float is NOT converted — it represents a weakly-typed
-    # literal that adapts its precision to context (GH-485).
-    if a is int:
-        a = int32
-    elif a is builtins.bool:
+    # Convert bool to canonical Warp type.
+    # Note: Python's float and int are NOT converted — they represent weakly-typed
+    # literals that adapt their precision to context (GH-485).
+    if a is builtins.bool:
         a = bool
 
-    if b is int:
-        b = int32
-    elif b is builtins.bool:
+    if b is builtins.bool:
         b = bool
 
     if match_generic:
         if a is Any or b is Any:
             return True
-        if a is Int and b in int_types:
+        if a is Int and (b in int_types or is_weak_int(b)):
             return True
-        if b is Int and a in int_types:
+        if b is Int and (a in int_types or is_weak_int(a)):
             return True
         if a is Int and b is Int:
             return True
-        if a is Scalar and (b in scalar_types or is_weak_float(b)):
+        if a is Scalar and (b in scalar_types or is_weak_type(b)):
             return True
-        if b is Scalar and (a in scalar_types or is_weak_float(a)):
+        if b is Scalar and (a in scalar_types or is_weak_type(a)):
             return True
         if a is Scalar and b is Scalar:
             return True
@@ -2685,15 +2696,11 @@ def types_equal_generic(a, b, match_generic=True):
             # A sequence can only match to another sequence.
             return False
 
-    # Convert int/bool to canonical Warp types (NOT float — it's weakly typed).
-    if a is int:
-        a = int32
-    elif a is builtins.bool:
+    # Convert bool to canonical Warp type (NOT float or int — they're weakly typed).
+    if a is builtins.bool:
         a = bool
 
-    if b is int:
-        b = int32
-    elif b is builtins.bool:
+    if b is builtins.bool:
         b = bool
 
     if getattr(a, "_wp_generic_type_hint_", "a") is getattr(b, "_wp_generic_type_hint_", "b"):
