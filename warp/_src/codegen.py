@@ -2765,11 +2765,18 @@ class Adjoint:
         return adj.add_builtin_call(name, [left, right])
 
     def emit_UnaryOp(adj, node):
+        # Fold negative numeric literals before evaluating the operand to avoid
+        # emitting a dead positive constant (e.g., var_0 = 3.14 alongside var_1 = -3.14).
+        if isinstance(node.op, ast.USub) and isinstance(node.operand, ast.Constant):
+            value = node.operand.value
+            if isinstance(value, (int, float)) and math.isfinite(value):
+                return adj.add_constant(-value)
+
         # evaluate unary op arguments
         arg = adj.eval(node.operand)
 
-        # Evaluate unary minus on a constant to a compile-time constant,
-        # preserving the operand's type (e.g., weakly-typed float stays float).
+        # Fold unary minus on non-literal constants (e.g., -wp.PI) to a compile-time
+        # constant, preserving the operand's type (weakly-typed float stays float).
         if arg.constant is not None and math.isfinite(arg.constant):
             if isinstance(node.op, ast.USub):
                 return adj.add_constant(-arg.constant, target_type=arg.type)
