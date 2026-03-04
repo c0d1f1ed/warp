@@ -1,6 +1,6 @@
-# Weakly-Typed Float Constants
+# Weakly-Typed Constants
 
-**Status**: Implemented
+**Status**: Implemented (float); in progress (int)
 
 **Issue**: [GH-485](https://github.com/NVIDIA/warp/issues/485)
 
@@ -34,6 +34,9 @@ higher-precision variables.
 | R4  | Compound constructors (`vec3d()`, `mat22f()`) pass literal precision to components | Should | Enables `wp.vec3d(1.1, 2.2, 3.3)` with full float64 precision |
 | R5  | Builtin function results with weak float input preserve weak typing | Must | `wp.sqrt(3.0)` adapts to context, not locked to float32 |
 | R6  | Module constants (`wp.PI`, `wp.E`, `wp.TAU`) adapt precision in typed constructors | Must | `wp.float64(wp.PI)` preserves full double precision |
+| R10 | Int literals adapt precision to surrounding typed context | Must | Mirrors R1 for int |
+| R11 | Weak int compatible with any strong int type (int8..uint64) | Must | Int-to-int adaptation |
+| R12 | Weak int compatible with any strong float type (int-to-float promotion) | Must | e.g., `wp.vec3d(1, 2, 3)` |
 
 R1 includes these concrete guarantees:
 - `wp.float64(3.141592653589793)` produces the exact double-precision value
@@ -53,27 +56,29 @@ R1 includes these concrete guarantees:
 | --- | ----------- | -------- | ----- |
 | R9  | No impact on existing user code that only uses float32 | Must | All existing tests must pass |
 
-**Non-goals**: Weak typing for integer literals (int is always mapped to int32).
+**Non-goals**: None — weak typing now covers both float and int literals.
 
 ## Design
 
 ### Approach
 
-Introduce a **weakly-typed float** concept where Python's built-in `float` type
-is treated as a distinct type during code generation, separate from Warp's
-`float32`. A weakly-typed float:
+Introduce **weakly-typed constants** where Python's built-in `float` and `int`
+types are treated as distinct types during code generation, separate from Warp's
+`float32` and `int32`. A weakly-typed constant:
 
-- Emits as C++ `double` for maximum precision at the code-generation level
-- Adapts to the first strongly-typed float found in the same expression
-- Defaults to `float32` when no typed context is available (backward compat)
+- Emits as C++ `double` (float) or `int64` (int) for maximum range/precision
+- Adapts to the first strongly-typed value found in the same expression
+- Defaults to `float32` / `int32` when no typed context is available (backward compat)
+- Weak int is also compatible with strong float types (int-to-float promotion)
 
-The key insight is distinguishing two uses of `float` in user code:
+The key insight is distinguishing two uses of `float`/`int` in user code:
 
-1. **Annotated `float`** (function parameter types) — converted to `float32`
-   early in `Adjoint.__init__` via `canonicalize_dtype()`. This is strongly typed.
-2. **Literal `float`** (from `add_constant` for numeric literals like `3.14`) —
-   stays as Python `float` internally, emits as C++ `double`. This is weakly
-   typed and adapts to context.
+1. **Annotated `float`/`int`** (function parameter types) — converted to
+   `float32`/`int32` early in `Adjoint.__init__` via `canonicalize_dtype()`.
+   This is strongly typed.
+2. **Literal `float`/`int`** (from `add_constant` for numeric literals like
+   `3.14` or `42`) — stays as Python `float`/`int` internally, emits as C++
+   `double`/`int64`. This is weakly typed and adapts to context.
 
 ### Alternatives Considered
 
@@ -114,6 +119,15 @@ Source: z = wp.float64(wp.PI)
     → emit_Attribute evaluates wp.PI → Var(type=float, constant=π)
     → emit_Call casts weak float arg to float64 via _cast_to
     → Var(type=float64, constant=π)    # strongly typed, full precision
+
+Source: n = 42
+  → emit_Constant → add_constant(42)
+    → Var(type=int, constant=42)       # weakly typed
+
+Source: n = wp.int64(42)
+  → _get_constructor_target_type → int64
+    → add_constant(42, target_type=int64)
+    → Var(type=int64, constant=42)     # strongly typed
 ```
 
 #### Overload Resolution
