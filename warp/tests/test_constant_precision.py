@@ -1210,6 +1210,54 @@ def test_augassign_weak_to_strong(test, device):
     np.testing.assert_allclose(result.numpy()[0], expected, rtol=0.0, atol=0.0)
 
 
+@wp.kernel
+def test_where_weak_float_kernel(result: wp.array(dtype=wp.float64)):
+    """wp.where with weak float branches adapts to typed context."""
+    cond = True
+    val = wp.where(cond, 3.141592653589793, 2.718281828459045)
+    result[0] = val
+
+
+def test_where_weak_float(test, device):
+    result = wp.zeros(1, dtype=wp.float64, device=device)
+    wp.launch(test_where_weak_float_kernel, dim=1, inputs=[result], device=device)
+    np.testing.assert_allclose(result.numpy()[0], 3.141592653589793, rtol=0.0, atol=0.0)
+
+
+@wp.kernel
+def test_comparison_weak_strong_kernel(result: wp.array(dtype=wp.int32)):
+    """Comparison operators cast weak float to match strong float."""
+    x = wp.float64(1.5)
+    if x > 1.0:
+        result[0] = 1
+    else:
+        result[0] = 0
+    if 0.5 < x:
+        result[1] = 1
+    else:
+        result[1] = 0
+
+
+def test_comparison_weak_strong(test, device):
+    result = wp.zeros(2, dtype=wp.int32, device=device)
+    wp.launch(test_comparison_weak_strong_kernel, dim=1, inputs=[result], device=device)
+    test.assertEqual(result.numpy()[0], 1)
+    test.assertEqual(result.numpy()[1], 1)
+
+
+@wp.kernel
+def test_augmented_array_store_kernel(arr: wp.array(dtype=wp.float64)):
+    """Augmented array store: arr[i] += weak_float preserves array dtype precision."""
+    arr[0] += 0.141592653589793
+
+
+def test_augmented_array_store(test, device):
+    arr = wp.array([3.0], dtype=wp.float64, device=device)
+    wp.launch(test_augmented_array_store_kernel, dim=1, inputs=[arr], device=device)
+    expected = 3.0 + 0.141592653589793
+    np.testing.assert_allclose(arr.numpy()[0], expected, rtol=0.0, atol=0.0)
+
+
 class TestConstantPrecision(unittest.TestCase):
     """Test suite for constant precision preservation."""
 
@@ -1468,6 +1516,9 @@ add_function_test(
 add_function_test(
     TestConstantPrecision, "test_augassign_weak_to_strong", test_augassign_weak_to_strong, devices=devices
 )
+add_function_test(TestConstantPrecision, "test_where_weak_float", test_where_weak_float, devices=devices)
+add_function_test(TestConstantPrecision, "test_comparison_weak_strong", test_comparison_weak_strong, devices=devices)
+add_function_test(TestConstantPrecision, "test_augmented_array_store", test_augmented_array_store, devices=devices)
 
 
 if __name__ == "__main__":
