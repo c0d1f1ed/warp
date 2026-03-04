@@ -25,7 +25,14 @@ import warp as wp
 from warp._src.codegen import Struct, StructInstance, get_annotations
 from warp._src.fem.operator import Integrand
 from warp._src.fem.types import Domain, Field
-from warp._src.types import get_type_code, type_repr, type_scalar_type, type_size, type_size_in_bytes, type_to_warp
+from warp._src.types import (
+    canonicalize_dtype,
+    get_type_code,
+    type_repr,
+    type_scalar_type,
+    type_size,
+    type_size_in_bytes,
+)
 from warp._src.utils import warn
 
 _wp_module_name_ = "warp.fem.cache"
@@ -59,7 +66,7 @@ def _arg_type_key(arg_type):
         return arg_type
     if arg_type in (Field, Domain):
         return ""
-    return get_type_code(type_to_warp(arg_type))
+    return get_type_code(canonicalize_dtype(arg_type))
 
 
 def _make_cache_key(func, key, argspec=None, allow_overloads: bool = True):
@@ -336,7 +343,7 @@ def get_integrand_kernel(
 def pod_type_key(pod_type: type):
     """Hashable key for POD (single or sequence of scalars) types."""
 
-    pod_type = type_to_warp(pod_type)
+    pod_type = canonicalize_dtype(pod_type)
     if hasattr(pod_type, "_wp_scalar_type_"):
         if hasattr(pod_type, "_shape_"):
             return (pod_type.__name__, pod_type._shape_, pod_type._wp_scalar_type_.__name__)
@@ -568,7 +575,7 @@ class TemporaryStore:
             device: Device on which to allocate the temporary.
             requires_grad: Whether to allocate a gradient array.
         """
-        dtype = type_to_warp(dtype)
+        dtype = canonicalize_dtype(dtype)
         device = wp.get_device(device)
 
         type_length = type_size(dtype)

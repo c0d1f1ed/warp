@@ -61,7 +61,7 @@ from warp._src.fem.types import (
 )
 from warp._src.fem.utils import type_zero_element
 from warp._src.sparse import BsrMatrix, bsr_set_from_triplets, bsr_zeros
-from warp._src.types import is_array, type_length, type_repr, type_scalar_type, type_size, type_to_warp
+from warp._src.types import canonicalize_dtype, is_array, type_length, type_repr, type_scalar_type, type_size
 from warp._src.utils import array_cast, warn
 
 __all__ = ["integrate", "interpolate"]
@@ -1803,7 +1803,7 @@ def integrate(
             raise ValueError("Incompatible integration and quadrature domain")
 
     # Canonicalize types
-    accumulate_dtype = type_to_warp(accumulate_dtype)
+    accumulate_dtype = canonicalize_dtype(accumulate_dtype)
     if output is not None:
         if isinstance(output, BsrMatrix):
             output_dtype = output.scalar_type
@@ -1812,7 +1812,7 @@ def integrate(
     elif output_dtype is None:
         output_dtype = accumulate_dtype
     else:
-        output_dtype = type_to_warp(output_dtype)
+        output_dtype = canonicalize_dtype(output_dtype)
 
     kernel, field_arg_values, value_struct_values = _generate_integrate_kernel(
         integrand=integrand,

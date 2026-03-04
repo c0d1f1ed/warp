@@ -27,7 +27,7 @@ from warp._src.fem.types import (
     QuadraturePointIndex,
     make_free_sample,
 )
-from warp._src.types import type_to_warp
+from warp._src.types import canonicalize_dtype
 
 from .basis_space import BasisSpace
 from .shape import ShapeFunction
@@ -241,8 +241,8 @@ class PointBasisSpace(BasisSpace):
         arg_types = argspec.annotations.copy()
 
         try:
-            first_arg_type = type_to_warp(arg_types.pop(argspec.args[0]))
-            second_arg_type = type_to_warp(arg_types.pop(argspec.args[1]))
+            first_arg_type = canonicalize_dtype(arg_types.pop(argspec.args[0]))
+            second_arg_type = canonicalize_dtype(arg_types.pop(argspec.args[1]))
 
             assert first_arg_type == wp.float32 and second_arg_type == wp.int32
         except Exception as err:

@@ -31,11 +31,11 @@ from warp._src.context import CudaMemcpyKind
 from warp._src.jax import get_jax_device
 from warp._src.types import (
     array_t,
+    canonicalize_dtype,
     launch_bounds_t,
     matches_array_class,
     strides_from_shape,
     type_size_in_bytes,
-    type_to_warp,
 )
 
 from .xla_ffi import *
@@ -129,7 +129,7 @@ class FfiArg:
         elif type in wp._src.types.value_types:
             self.dtype_ndim = 0
             self.dtype_shape = ()
-            self.jax_scalar_type = wp.dtype_to_jax(type_to_warp(type))
+            self.jax_scalar_type = wp.dtype_to_jax(canonicalize_dtype(type))
             self.jax_ndim = 0
             self.warp_ndim = 0
         else:

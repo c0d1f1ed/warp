@@ -26,6 +26,7 @@ from warp._src.fem.space import FunctionSpace, SpacePartition
 from warp._src.fem.types import NULL_ELEMENT_INDEX, ElementKind, Field, Sample
 from warp._src.fem.utils import type_zero_element
 from warp._src.types import (
+    canonicalize_dtype,
     is_value,
     type_is_matrix,
     type_is_quaternion,
@@ -33,7 +34,6 @@ from warp._src.types import (
     type_repr,
     type_scalar_type,
     type_size,
-    type_to_warp,
     types_equal,
     types_equal_generic,
 )
@@ -343,7 +343,7 @@ class ImplicitField(GeometryField):
             first_arg_type = arg_types.pop(argspec.args[0])
             if types_equal_generic(first_arg_type, wp.types.vector(length=domain.geometry.dimension, dtype=float)):
                 self._qp_based = False
-            elif type_to_warp(first_arg_type) == wp.int32:
+            elif canonicalize_dtype(first_arg_type) == wp.int32:
                 self._qp_based = True
             else:
                 raise TypeError(f"Unsupported argument type `{type_repr(first_arg_type)}`")
@@ -494,7 +494,7 @@ class UniformField(GeometryField):
         if not is_value(value):
             raise ValueError("value must be a Warp scalar, vector or matrix")
 
-        value_type = type_to_warp(type(value))
+        value_type = canonicalize_dtype(type(value))
         self._value = value_type(value)
 
         cache.setup_dynamic_attributes(self)
@@ -506,7 +506,7 @@ class UniformField(GeometryField):
 
     @value.setter
     def value(self, v):
-        value_type = type_to_warp(type(v))
+        value_type = canonicalize_dtype(type(v))
         assert types_equal(value_type, self.dtype)
         self._value = self.dtype(v)
 

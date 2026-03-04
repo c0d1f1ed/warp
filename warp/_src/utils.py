@@ -866,13 +866,13 @@ def map(
 
     from .codegen import Adjoint, Struct, StructInstance  # noqa: PLC0415
     from .types import (  # noqa: PLC0415
+        canonicalize_dtype,
         is_array,
         type_is_matrix,
         type_is_quaternion,
         type_is_transformation,
         type_is_vector,
         type_repr,
-        type_to_warp,
         types_equal,
     )
 
@@ -918,7 +918,7 @@ def map(
         if issubclass(dtype, StructInstance):
             # a struct
             return value._cls
-        return type_to_warp(dtype)
+        return canonicalize_dtype(dtype)
 
     module = None
     out_dtypes = None

@@ -361,6 +361,18 @@ class uint64(int_base):
 # Scalar type tuples - defined here as canonical source, used by TypeVars below
 int_types = (int8, uint8, int16, uint16, int32, uint32, int64, uint64)
 float_types = (float16, float32, float64)
+
+
+def is_weak_float(t: type) -> builtins.bool:
+    """True if *t* is a weakly-typed Python float (adapts precision to context)."""
+    return t is float
+
+
+def is_strong_float(t: type) -> builtins.bool:
+    """True if *t* is a strongly-typed Warp float (float16, float32, or float64)."""
+    return t in float_types
+
+
 scalar_types = int_types + float_types
 scalar_and_bool_types = (*scalar_types, bool)
 
@@ -421,7 +433,7 @@ class Vector(Generic[Scalar, Length]):
 
         if len(params) == 2:
             dtype, length = params
-            dtype = type_to_warp(dtype)
+            dtype = canonicalize_dtype(dtype)
             length = _unwrap_literal(length)
             if not isinstance(length, int) or length <= 0:
                 raise TypeError(f"Vector length must be a positive integer, got {length!r}")
@@ -449,7 +461,7 @@ class Matrix(Generic[Scalar, Rows, Cols]):
 
         if len(params) == 3:
             dtype, rows, cols = params
-            dtype = type_to_warp(dtype)
+            dtype = canonicalize_dtype(dtype)
             rows = _unwrap_literal(rows)
             cols = _unwrap_literal(cols)
             if not isinstance(rows, int) or rows <= 0:
@@ -472,7 +484,7 @@ class Quaternion(Generic[Float]):
     def __class_getitem__(cls, params):
         if isinstance(params, TypeVar):
             return super().__class_getitem__(params)
-        return quaternion(type_to_warp(params))
+        return quaternion(canonicalize_dtype(params))
 
 
 class Transformation(Generic[Float]):
@@ -486,7 +498,7 @@ class Transformation(Generic[Float]):
     def __class_getitem__(cls, params):
         if isinstance(params, TypeVar):
             return super().__class_getitem__(params)
-        return transformation(type_to_warp(params))
+        return transformation(canonicalize_dtype(params))
 
 
 class Array(Generic[DType]):
@@ -746,16 +758,27 @@ def _rbinary_op(self, op, x, t, cw=True):
     return t(*(warp._src.context.call_builtin_from_desc(desc, (b, a)) for a, b in zip(self, x)))
 
 
+def canonicalize_dtype(dtype: type) -> type:
+    """Convert Python builtins to their Warp equivalents.
+
+    Maps ``float`` to :class:`float32`, ``int`` to :class:`int32`,
+    and ``bool`` to :class:`bool`.  All other types pass through unchanged.
+    """
+    if dtype is float:
+        return float32
+    elif dtype is int:
+        return int32
+    elif dtype is builtins.bool:
+        return bool
+    else:
+        return dtype
+
+
 @functools.cache
 def vector(length, dtype):
     """Create a vector type with the given length and data type."""
     # canonicalize dtype
-    if dtype is int:
-        dtype = int32
-    elif dtype is float:
-        dtype = float32
-    elif dtype is builtins.bool:
-        dtype = bool
+    dtype = canonicalize_dtype(dtype)
 
     class vec_t(ctypes.Array):
         # ctypes.Array data for length, shape and c type:
@@ -973,12 +996,7 @@ def matrix(shape, dtype):
     assert len(shape) == 2
 
     # canonicalize dtype
-    if dtype is int:
-        dtype = int32
-    elif dtype is float:
-        dtype = float32
-    elif dtype is builtins.bool:
-        dtype = bool
+    dtype = canonicalize_dtype(dtype)
 
     class mat_t(ctypes.Array):
         _length_ = 0 if shape[0] is Any or shape[1] is Any else shape[0] * shape[1]
@@ -1510,6 +1528,8 @@ class void:
 @functools.cache
 def quaternion(dtype=Any):
     """Create a quaternion type with the given data type."""
+    # canonicalize dtype
+    dtype = canonicalize_dtype(dtype)
 
     class quat_t(vector(length=4, dtype=dtype)):
         pass
@@ -1541,6 +1561,8 @@ class quatd(quaternion(dtype=float64)):
 @functools.cache
 def transformation(dtype=Any):
     """Create a rigid-body transformation type with the given data type."""
+    # canonicalize dtype
+    dtype = canonicalize_dtype(dtype)
 
     class transform_t(vector(length=7, dtype=dtype)):
         _wp_init_from_components_sig_ = inspect.Signature(
@@ -2290,17 +2312,6 @@ def type_size_in_bytes(dtype: type) -> int:
     return size
 
 
-def type_to_warp(dtype: type) -> type:
-    if dtype is float:
-        return float32
-    elif dtype is int:
-        return int32
-    elif dtype is builtins.bool:
-        return bool
-    else:
-        return dtype
-
-
 def type_typestr(dtype: type) -> str:
     if dtype is bool:
         return "|b1"
@@ -2575,17 +2586,15 @@ def is_slice(x) -> builtins.bool:
 
 
 def scalars_equal_generic(a, b, match_generic=True):
-    # convert to canonical types
-    if a is float:
-        a = float32
-    elif a is int:
+    # Convert int/bool to canonical Warp types.
+    # Note: Python's float is NOT converted — it represents a weakly-typed
+    # literal that adapts its precision to context (GH-485).
+    if a is int:
         a = int32
     elif a is builtins.bool:
         a = bool
 
-    if b is float:
-        b = float32
-    elif b is int:
+    if b is int:
         b = int32
     elif b is builtins.bool:
         b = bool
@@ -2599,15 +2608,15 @@ def scalars_equal_generic(a, b, match_generic=True):
             return True
         if a is Int and b is Int:
             return True
-        if a is Scalar and b in scalar_types:
+        if a is Scalar and (b in scalar_types or is_weak_float(b)):
             return True
-        if b is Scalar and a in scalar_types:
+        if b is Scalar and (a in scalar_types or is_weak_float(a)):
             return True
         if a is Scalar and b is Scalar:
             return True
-        if a is Float and b in float_types:
+        if a is Float and (is_strong_float(b) or is_weak_float(b)):
             return True
-        if b is Float and a in float_types:
+        if b is Float and (is_strong_float(a) or is_weak_float(a)):
             return True
         if a is Float and b is Float:
             return True
@@ -2676,17 +2685,13 @@ def types_equal_generic(a, b, match_generic=True):
             # A sequence can only match to another sequence.
             return False
 
-    # convert to canonical types
-    if a is float:
-        a = float32
-    elif a is int:
+    # Convert int/bool to canonical Warp types (NOT float — it's weakly typed).
+    if a is int:
         a = int32
     elif a is builtins.bool:
         a = bool
 
-    if b is float:
-        b = float32
-    elif b is int:
+    if b is int:
         b = int32
     elif b is builtins.bool:
         b = bool
@@ -4646,7 +4651,7 @@ class _ArrayAnnotationBase:
     # Subclasses must set _concrete_cls to the corresponding array class.
 
     def __init__(self, dtype, ndim=1):
-        self.dtype = dtype if dtype is Any else type_to_warp(dtype)
+        self.dtype = dtype if dtype is Any else canonicalize_dtype(dtype)
         self.ndim = ndim
 
     def __repr__(self):
@@ -4842,7 +4847,7 @@ class tile(Tile):
         strides: tuple[int, ...] | None = None,
         owner: builtins.bool = True,
     ):
-        self.dtype = type_to_warp(dtype)
+        self.dtype = canonicalize_dtype(dtype)
         self.shape = shape
         self.storage = storage
         self.layout = layout
@@ -6201,7 +6206,7 @@ class Volume:
             )
         else:
             # normalize background value type
-            grid_type = type_to_warp(type(bg_value))
+            grid_type = canonicalize_dtype(type(bg_value))
             if not (is_value(bg_value) or type_is_vector(grid_type)) and (
                 hasattr(bg_value, "__len__") and is_value(bg_value[0])
             ):
@@ -6556,8 +6561,8 @@ def type_matches_template(arg_type, template_type):
     """
 
     # canonicalize types
-    arg_type = type_to_warp(arg_type)
-    template_type = type_to_warp(template_type)
+    arg_type = canonicalize_dtype(arg_type)
+    template_type = canonicalize_dtype(template_type)
 
     # arg type must be concrete
     if type_is_generic(arg_type):
@@ -6641,7 +6646,7 @@ def infer_argument_types(args: list[Any], template_types, arg_names: list[str] |
             arg_types.append(arg_type)
         elif arg_type in (int, float, builtins.bool):
             # canonicalize type
-            arg_types.append(type_to_warp(arg_type))
+            arg_types.append(canonicalize_dtype(arg_type))
         elif hasattr(arg_type, "_wp_scalar_type_"):
             # vector/matrix type
             arg_types.append(arg_type)

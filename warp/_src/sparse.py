@@ -29,6 +29,7 @@ from warp._src.types import (
     Rows,
     Scalar,
     Vector,
+    canonicalize_dtype,
     is_array,
     scalar_types,
     type_is_matrix,
@@ -36,7 +37,6 @@ from warp._src.types import (
     type_scalar_type,
     type_size,
     type_size_in_bytes,
-    type_to_warp,
     types_equal,
 )
 
@@ -315,7 +315,7 @@ def _redeem_transfer_buf(device, buf, event):
 
 
 def bsr_matrix_t(dtype: BlockType):
-    dtype = type_to_warp(dtype)
+    dtype = canonicalize_dtype(dtype)
 
     if not type_is_matrix(dtype) and dtype not in scalar_types:
         raise ValueError(f"BsrMatrix block type must be either warp matrix or scalar; got {type_repr(dtype)}")
