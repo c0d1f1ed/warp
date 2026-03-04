@@ -1195,6 +1195,21 @@ def test_multi_assign_weak_to_strong(test, device):
     np.testing.assert_allclose(result.numpy()[1], expected_e, rtol=0.0, atol=0.0)
 
 
+@wp.kernel
+def test_augassign_weak_to_strong_kernel(result: wp.array(dtype=wp.float64)):
+    """Augmented assignment: weak float result cast to match existing strong-float symbol."""
+    x = wp.float64(3.0)
+    x += 0.141592653589793  # RHS is weak float; result should stay float64
+    result[0] = x
+
+
+def test_augassign_weak_to_strong(test, device):
+    result = wp.zeros(1, dtype=wp.float64, device=device)
+    wp.launch(test_augassign_weak_to_strong_kernel, dim=1, inputs=[result], device=device)
+    expected = 3.0 + 0.141592653589793
+    np.testing.assert_allclose(result.numpy()[0], expected, rtol=0.0, atol=0.0)
+
+
 class TestConstantPrecision(unittest.TestCase):
     """Test suite for constant precision preservation."""
 
@@ -1449,6 +1464,9 @@ add_function_test(
 )
 add_function_test(
     TestConstantPrecision, "test_multi_assign_weak_to_strong", test_multi_assign_weak_to_strong, devices=devices
+)
+add_function_test(
+    TestConstantPrecision, "test_augassign_weak_to_strong", test_augassign_weak_to_strong, devices=devices
 )
 
 

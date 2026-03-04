@@ -3826,7 +3826,11 @@ class Adjoint:
                 existing_type = adj.symbols[lhs.id].type
                 result_type = strip_reference(result.type)
                 if not types_equal(result_type, existing_type):
-                    if not adj._float_types_compatible(result_type, existing_type):
+                    if is_weak_float(result_type) and is_strong_float(existing_type):
+                        result = adj._cast_to(result, existing_type)
+                    elif is_weak_float(existing_type) and is_strong_float(result_type):
+                        pass  # Existing var was weakly typed, now strongly typed
+                    else:
                         raise WarpCodegenTypeError(
                             f"Error, augmented assignment to `{lhs.id}` ({existing_type}) "
                             f"produces different type ({result_type})"
