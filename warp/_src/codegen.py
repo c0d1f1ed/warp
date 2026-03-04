@@ -3738,7 +3738,7 @@ class Adjoint:
             if old_ctypes != new_ctypes:
                 # Check if the mismatch is just weak float vs strongly-typed float — if so,
                 # the first return was weak float (C++ double). Re-type it to match.
-                if all(
+                if len(old_ctypes) == len(new_ctypes) and all(
                     (oc == nc) or (oc == "double" and nc in ("wp::float32", "wp::float64", "wp::float16"))
                     for oc, nc in zip(old_ctypes, new_ctypes)
                 ):
