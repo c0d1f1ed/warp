@@ -1940,18 +1940,22 @@ class Adjoint:
                 elif isinstance(var, tuple):
                     yield from (x for x in var if isinstance(x, Var))
 
+        strong_floats = set()
         for var in _iter_vars(bound_args):
             var_type = get_arg_type(var)
             if is_strong_float(var_type):
-                return var_type
+                strong_floats.add(var_type)
+                continue
             scalar_type = getattr(var_type, "_wp_scalar_type_", None)
             if is_strong_float(scalar_type):
-                return scalar_type
+                strong_floats.add(scalar_type)
+                continue
             elem_dtype = getattr(var_type, "dtype", None)
             if is_strong_float(elem_dtype):
-                return elem_dtype
-            if is_weak_float(elem_dtype):
-                return float32
+                strong_floats.add(elem_dtype)
+
+        if strong_floats:
+            return widest_float_type(strong_floats)
 
         # Check the dtype keyword argument as a last resort
         dtype_kwarg = bound_args.get("dtype")
