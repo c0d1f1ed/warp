@@ -591,6 +591,8 @@ def scalar_infer_type(arg_types: Mapping[str, type] | tuple[type, ...] | None):
         raise RuntimeError(
             f"Couldn't figure out return type as arguments have multiple precisions: {list(scalar_types_found)}"
         )
+    if not scalar_types_found:
+        raise RuntimeError("Could not infer scalar type from the given arguments")
     result = next(iter(scalar_types_found))
     return _resolve_dtype_default(result)
 

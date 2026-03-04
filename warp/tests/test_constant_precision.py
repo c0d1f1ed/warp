@@ -1269,6 +1269,14 @@ class TestConstantPrecision(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, r"Input types must be the same"):
             wp.launch(kernel, dim=1, device="cpu")
 
+    def test_scalar_infer_type_empty_raises(self):
+        """scalar_infer_type raises RuntimeError (not StopIteration) when no scalar types found."""
+        from warp._src.builtins import scalar_infer_type
+
+        # str is not a scalar type, not a compound type, not a float
+        with self.assertRaises(RuntimeError):
+            scalar_infer_type((str,))
+
 
 devices = get_test_devices()
 
