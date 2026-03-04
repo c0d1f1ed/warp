@@ -217,6 +217,7 @@ class Function:
         self.replay_snippet = replay_snippet
         self.custom_grad_func: Function | None = None
         self.require_original_output_arg = require_original_output_arg
+        self.sametypes = getattr(value_func, "_sametypes", False)
         self.generic_parent = None  # generic function that was used to instantiate this overload
 
         if initializer_list_func is None:
@@ -287,7 +288,7 @@ class Function:
             # builtin (native) function, canonicalize argument types
             if input_types is not None:
                 for k, v in input_types.items():
-                    self.input_types[k] = warp._src.types.type_to_warp(v)
+                    self.input_types[k] = warp._src.types.canonicalize_dtype(v)
 
             # cache mangled name
             if self.export and self.is_simple():
@@ -348,14 +349,18 @@ class Function:
                 warp._src.codegen.apply_defaults(bound_args, self.defaults)
 
             arguments = tuple(bound_args.arguments.values())
-            arg_types = tuple(warp._src.codegen.get_arg_type(x) for x in arguments)
+            # Convert Python float/int arg types for overload matching
+            arg_types_converted = tuple(
+                warp._src.types.canonicalize_dtype(t) if t in (float, int) else t
+                for t in (warp._src.codegen.get_arg_type(x) for x in arguments)
+            )
 
             # try and find a matching overload
             for overload in self.user_overloads.values():
                 if len(overload.input_types) != len(arguments):
                     continue
 
-                if not warp._src.codegen.func_match_args(overload, arg_types, {}):
+                if not warp._src.codegen.func_match_args(overload, arg_types_converted, {}):
                     continue
 
                 template_types = list(overload.input_types.values())
@@ -412,6 +417,8 @@ class Function:
             # with the exact same signature as this would cause compile
             # errors during compile time. We should check here if there
             # is a previously created function with the same signature
+            if f.sametypes:
+                self.sametypes = True
             self.overloads.append(f)
 
             # make sure variadic overloads appear last so non variadic
@@ -463,10 +470,11 @@ class Function:
 
                 arg_names = f.input_types.keys()
                 overload_annotations = dict(zip(arg_names, arg_types))
-                # add defaults
+                # add defaults — convert raw Python float/int defaults to Warp types
                 for k, d in f.defaults.items():
                     if k not in overload_annotations:
-                        overload_annotations[k] = warp._src.codegen.strip_reference(warp._src.codegen.get_arg_type(d))
+                        t = warp._src.codegen.strip_reference(warp._src.codegen.get_arg_type(d))
+                        overload_annotations[k] = warp._src.types.canonicalize_dtype(t)
 
                 ovl = shallowcopy(f)
                 ovl.adj = warp._src.codegen.Adjoint(f.func, overload_annotations, source=f.adj.source)

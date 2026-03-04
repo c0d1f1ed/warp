@@ -59,6 +59,7 @@ def sametypes_create_value_func(default: TypeVar):
         arg_type_0 = next(iter(arg_types.values()))
         return arg_type_0
 
+    fn._sametypes = True
     return fn
 
 
@@ -554,6 +555,16 @@ add_builtin(
 )
 
 
+def _resolve_dtype_default(value_type):
+    """Default weakly-typed float to float32 for constructor dtype inference."""
+    return float32 if is_weak_float(value_type) else value_type
+
+
+def _check_dtype_mismatch(value_type, dtype):
+    """True if *value_type* is incompatible with *dtype* (weakly-typed float is always compatible)."""
+    return not is_weak_float(value_type) and not warp._src.types.scalars_equal(value_type, dtype)
+
+
 def scalar_infer_type(arg_types: Mapping[str, type] | tuple[type, ...] | None):
     if arg_types is None:
         return Scalar
@@ -561,18 +572,27 @@ def scalar_infer_type(arg_types: Mapping[str, type] | tuple[type, ...] | None):
     if isinstance(arg_types, Mapping):
         arg_types = tuple(arg_types.values())
 
-    scalar_types = set()
+    scalar_types_found = set()
     for t in arg_types:
         if hasattr(t, "_wp_scalar_type_"):
-            scalar_types.add(t._wp_scalar_type_)
+            scalar_types_found.add(t._wp_scalar_type_)
         elif t in scalar_and_bool_types:
-            scalar_types.add(t)
+            scalar_types_found.add(t)
+        elif is_weak_float(t):
+            scalar_types_found.add(float)
 
-    if len(scalar_types) > 1:
+    # Remove weakly-typed float if there's a strongly-typed float to match
+    if float in scalar_types_found and len(scalar_types_found) > 1:
+        other_types = scalar_types_found - {float}
+        if any(is_strong_float(t) for t in other_types):
+            scalar_types_found.discard(float)
+
+    if len(scalar_types_found) > 1:
         raise RuntimeError(
-            f"Couldn't figure out return type as arguments have multiple precisions: {list(scalar_types)}"
+            f"Couldn't figure out return type as arguments have multiple precisions: {list(scalar_types_found)}"
         )
-    return next(iter(scalar_types))
+    result = next(iter(scalar_types_found))
+    return _resolve_dtype_default(result)
 
 
 def scalar_sametypes_value_func(arg_types: Mapping[str, type], arg_values: Mapping[str, Any]):
@@ -733,9 +753,11 @@ add_builtin(
 add_builtin(
     "skew",
     input_types={"vec": vector(length=3, dtype=Scalar)},
-    value_func=lambda arg_types, arg_values: matrix(shape=(3, 3), dtype=Scalar)
-    if arg_types is None
-    else matrix(shape=(3, 3), dtype=arg_types["vec"]._wp_scalar_type_),
+    value_func=lambda arg_types, arg_values: (
+        matrix(shape=(3, 3), dtype=Scalar)
+        if arg_types is None
+        else matrix(shape=(3, 3), dtype=arg_types["vec"]._wp_scalar_type_)
+    ),
     group="Vector Math",
     doc="Compute the skew-symmetric 3x3 matrix for a 3D vector ``vec``.",
 )
@@ -801,9 +823,11 @@ add_builtin(
 add_builtin(
     "transpose",
     input_types={"a": matrix(shape=(Any, Any), dtype=Scalar)},
-    value_func=lambda arg_types, arg_values: matrix(shape=(Any, Any), dtype=Scalar)
-    if arg_types is None
-    else matrix(shape=(arg_types["a"]._shape_[1], arg_types["a"]._shape_[0]), dtype=arg_types["a"]._wp_scalar_type_),
+    value_func=lambda arg_types, arg_values: (
+        matrix(shape=(Any, Any), dtype=Scalar)
+        if arg_types is None
+        else matrix(shape=(arg_types["a"]._shape_[1], arg_types["a"]._shape_[0]), dtype=arg_types["a"]._wp_scalar_type_)
+    ),
     group="Vector Math",
     doc="Compute the transpose of matrix ``a``.",
 )
@@ -1058,8 +1082,8 @@ def vector_value_func(arg_types: Mapping[str, type], arg_values: Mapping[str, An
                 raise RuntimeError("the `length` argument must be specified when filling a vector with a value")
 
             if dtype is None:
-                dtype = value_type
-            elif not warp._src.types.scalars_equal(value_type, dtype):
+                dtype = _resolve_dtype_default(value_type)
+            elif _check_dtype_mismatch(value_type, dtype):
                 raise RuntimeError(
                     f"the value used to fill this vector is expected to be of the type `{dtype.__name__}`"
                 )
@@ -1073,14 +1097,11 @@ def vector_value_func(arg_types: Mapping[str, type], arg_values: Mapping[str, An
                 f"when constructing a vector of length {length}"
             )
 
-        try:
-            value_type = scalar_infer_type(variadic_arg_types)
-        except RuntimeError:
-            raise RuntimeError("all values given when constructing a vector must have the same type") from None
+        value_type = scalar_infer_type(variadic_arg_types)
 
         if dtype is None:
-            dtype = value_type
-        elif not warp._src.types.scalars_equal(value_type, dtype):
+            dtype = _resolve_dtype_default(value_type)
+        elif _check_dtype_mismatch(value_type, dtype):
             raise RuntimeError(
                 f"all values used to initialize this vector are expected to be of the type `{dtype.__name__}`"
             )
@@ -1164,8 +1185,8 @@ def matrix_value_func(arg_types: Mapping[str, type], arg_values: Mapping[str, An
                 raise RuntimeError("the `shape` argument must be specified when filling a matrix with a value")
 
             if dtype is None:
-                dtype = value_type
-            elif not warp._src.types.scalars_equal(value_type, dtype):
+                dtype = _resolve_dtype_default(value_type)
+            elif _check_dtype_mismatch(value_type, dtype):
                 raise RuntimeError(
                     f"the value used to fill this matrix is expected to be of the type `{dtype.__name__}`"
                 )
@@ -1184,14 +1205,11 @@ def matrix_value_func(arg_types: Mapping[str, type], arg_values: Mapping[str, An
                 f"when constructing a matrix of shape {tuple(shape)}"
             )
 
-        try:
-            value_type = scalar_infer_type(variadic_arg_types)
-        except RuntimeError:
-            raise RuntimeError("all values given when constructing a matrix must have the same type") from None
+        value_type = scalar_infer_type(variadic_arg_types)
 
         if dtype is None:
-            dtype = value_type
-        elif not warp._src.types.scalars_equal(value_type, dtype):
+            dtype = _resolve_dtype_default(value_type)
+        elif _check_dtype_mismatch(value_type, dtype):
             raise RuntimeError(
                 f"all values used to initialize this matrix are expected to be of the type `{dtype.__name__}`"
             )
@@ -1597,14 +1615,11 @@ def quaternion_value_func(arg_types: Mapping[str, type], arg_values: Mapping[str
             if dtype is None:
                 dtype = in_quat._wp_scalar_type_
     else:
-        try:
-            value_type = scalar_infer_type(variadic_arg_types)
-        except RuntimeError:
-            raise RuntimeError("all values given when constructing a quaternion must have the same type") from None
+        value_type = scalar_infer_type(variadic_arg_types)
 
         if dtype is None:
-            dtype = value_type
-        elif not warp._src.types.scalars_equal(value_type, dtype):
+            dtype = _resolve_dtype_default(value_type)
+        elif _check_dtype_mismatch(value_type, dtype):
             raise RuntimeError(
                 f"all values used to initialize this quaternion are expected to be of the type `{dtype.__name__}`"
             )
@@ -1848,8 +1863,8 @@ def transformation_value_func(arg_types: Mapping[str, type], arg_values: Mapping
         # `wp.transformation(123)`.
         value_type = variadic_arg_types[0]
         if dtype is None:
-            dtype = value_type
-        elif not warp._src.types.scalars_equal(value_type, dtype):
+            dtype = _resolve_dtype_default(value_type)
+        elif _check_dtype_mismatch(value_type, dtype):
             raise RuntimeError(
                 f"the value used to fill this transform is expected to be of the type `{dtype.__name__}`"
             )
@@ -1861,8 +1876,8 @@ def transformation_value_func(arg_types: Mapping[str, type], arg_values: Mapping
             raise RuntimeError("all values given when constructing a transform must have the same type") from None
 
         if dtype is None:
-            dtype = value_type
-        elif not warp._src.types.scalars_equal(value_type, dtype):
+            dtype = _resolve_dtype_default(value_type)
+        elif _check_dtype_mismatch(value_type, dtype):
             raise RuntimeError(
                 f"all values used to initialize this transform are expected to be of the type `{dtype.__name__}`"
             )
@@ -1886,8 +1901,8 @@ def transformation_pq_value_func(arg_types: Mapping[str, type], arg_values: Mapp
 
     dtype = arg_values.get("dtype", None)
     if dtype is None:
-        dtype = value_type
-    elif not warp._src.types.scalars_equal(value_type, dtype):
+        dtype = _resolve_dtype_default(value_type)
+    elif _check_dtype_mismatch(value_type, dtype):
         raise RuntimeError(
             f"all values used to initialize this transformation matrix are expected to be of the type `{dtype.__name__}`"
         )
@@ -2125,8 +2140,8 @@ def spatial_vector_value_func(arg_types: Mapping[str, type], arg_values: Mapping
             raise RuntimeError("all values given when constructing a spatial vector must have the same type") from None
 
         if dtype is None:
-            dtype = value_type
-        elif not warp._src.types.scalars_equal(value_type, dtype):
+            dtype = _resolve_dtype_default(value_type)
+        elif _check_dtype_mismatch(value_type, dtype):
             raise RuntimeError(
                 f"all values used to initialize this spatial vector are expected to be of the type `{dtype.__name__}`"
             )
@@ -2230,18 +2245,22 @@ add_builtin(
 add_builtin(
     "spatial_top",
     input_types={"svec": vector(length=6, dtype=Float)},
-    value_func=lambda arg_types, arg_values: vector(length=3, dtype=Float)
-    if arg_types is None
-    else vector(length=3, dtype=arg_types["svec"]._wp_scalar_type_),
+    value_func=lambda arg_types, arg_values: (
+        vector(length=3, dtype=Float)
+        if arg_types is None
+        else vector(length=3, dtype=arg_types["svec"]._wp_scalar_type_)
+    ),
     group="Spatial Math",
     doc="Extract the top (first) part of a 6D screw vector.",
 )
 add_builtin(
     "spatial_bottom",
     input_types={"svec": vector(length=6, dtype=Float)},
-    value_func=lambda arg_types, arg_values: vector(length=3, dtype=Float)
-    if arg_types is None
-    else vector(length=3, dtype=arg_types["svec"]._wp_scalar_type_),
+    value_func=lambda arg_types, arg_values: (
+        vector(length=3, dtype=Float)
+        if arg_types is None
+        else vector(length=3, dtype=arg_types["svec"]._wp_scalar_type_)
+    ),
     group="Spatial Math",
     doc="Extract the bottom (second) part of a 6D screw vector.",
 )

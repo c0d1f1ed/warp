@@ -254,7 +254,7 @@ class fabricarray(noncontiguous_array_base):
 
         else:
             # empty array or type annotation
-            self.dtype = dtype
+            self.dtype = dtype if dtype is Any else warp._src.types.canonicalize_dtype(dtype)
             self.ndim = ndim or 1
             self.device = None
             self.access = None
@@ -374,7 +374,7 @@ class indexedfabricarray(noncontiguous_array_base):
             # allow empty indexedarrays in type annotations
             self.fa = None
             self.indices = None
-            self.dtype = dtype
+            self.dtype = dtype if dtype is None else warp._src.types.canonicalize_dtype(dtype)
             self.ndim = ndim or 1
             self.device = None
             self.size = 0

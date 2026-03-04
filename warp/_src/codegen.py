@@ -42,6 +42,21 @@ _wp_module_name_ = "warp.codegen"
 options = {}
 
 
+def widest_float_type(type_iter):
+    """Return the widest float type from an iterable, or None if no float types found.
+
+    Precedence: float64 > float32 > float16.
+    """
+    types = set(type_iter) if not isinstance(type_iter, set) else type_iter
+    if float64 in types:
+        return float64
+    if float32 in types:
+        return float32
+    if float16 in types:
+        return float16
+    return None
+
+
 def get_node_name_safe(node):
     """Safely get a string representation of an AST node for error messages.
 
@@ -95,6 +110,13 @@ class WarpCodegenKeyError(KeyError):
 
 class WarpCodegenValueError(ValueError):
     """Value error during Warp kernel code generation."""
+
+    def __init__(self, message):
+        super().__init__(message)
+
+
+class WarpCodegenOverloadError(WarpCodegenError):
+    """No matching function overload found for the given argument types."""
 
     def __init__(self, message):
         super().__init__(message)
@@ -743,7 +765,7 @@ class Var:
         relative_lineno: int | None = None,
     ):
         # convert built-in types to wp types
-        if type == float:
+        if type == float and constant is None:
             type = float32
         elif type == int:
             type = int32
@@ -778,8 +800,11 @@ class Var:
             return t.native_name
         elif hasattr(t, "_wp_native_name_"):
             return f"wp::{t._wp_native_name_}"
-        elif t.__name__ in ("bool", "int", "float"):
+        elif t.__name__ in ("bool", "int"):
             return t.__name__
+        elif is_weak_float(t):
+            # Weakly-typed float emits as C++ double for maximum precision.
+            return "double"
 
         return f"wp::{t.__name__}"
 
@@ -905,8 +930,10 @@ def func_match_args(func, arg_types, kwarg_types):
         return False
 
     # Populate the bound arguments with any default values.
+    # Default values are raw Python objects (e.g., 0.5), not Vars, so
+    # get_arg_type returns float/int. Convert to Warp types for matching.
     default_arg_types = {
-        k: None if v is None else get_arg_type(v)
+        k: None if v is None else canonicalize_dtype(get_arg_type(v))
         for k, v in func.defaults.items()
         if k not in bound_arg_types.arguments
     }
@@ -1105,6 +1132,18 @@ class Adjoint:
                 if arg_name not in overload_annotations:
                     raise WarpCodegenError(f"Incomplete overload annotations for function {adj.fun_name}")
             adj.arg_types = overload_annotations.copy()
+
+        # Convert Python builtins to Warp types in annotations so that function
+        # parameters are always strongly typed (e.g., `float` → float32, `int` → int32).
+        # This distinguishes annotated `float` (strongly-typed float32) from literal
+        # `float` (weakly-typed, adapts precision to context).
+        def _convert_annotation(t):
+            """Convert Python builtins in annotations, recursing into tuple types."""
+            if get_origin(t) is tuple:
+                return tuple[tuple(_convert_annotation(a) for a in get_args(t))]
+            return warp._src.types.canonicalize_dtype(t)
+
+        adj.arg_types = {k: _convert_annotation(v) for k, v in adj.arg_types.items()}
 
         adj.args = []
         adj.symbols = {}
@@ -1309,11 +1348,15 @@ class Adjoint:
                     f"`{warp._src.context.type_str(adj.arg_types['return'])}`."
                 )
             elif not types_equal(adj.arg_types["return"], adj.return_var[0].type):
-                raise WarpCodegenError(
-                    f"The function `{adj.fun_name}` has its return type "
-                    f"annotated as `{warp._src.context.type_str(adj.arg_types['return'])}` "
-                    f"but the code returns a value of type `{warp._src.context.type_str(adj.return_var[0].type)}`."
-                )
+                # Allow weakly-typed float return to match any float annotation
+                ret_type = adj.return_var[0].type
+                ann_type = adj.arg_types["return"]
+                if not (is_weak_float(ret_type) and is_strong_float(ann_type)):
+                    raise WarpCodegenError(
+                        f"The function `{adj.fun_name}` has its return type "
+                        f"annotated as `{warp._src.context.type_str(ann_type)}` "
+                        f"but the code returns a value of type `{warp._src.context.type_str(ret_type)}`."
+                    )
 
     # code generation methods
     def format_template(adj, template, input_vars, output_var):
@@ -1498,9 +1541,30 @@ class Adjoint:
         if line_directive := adj.get_line_directive(statement, adj.lineno):
             adj.blocks[-1].body_reverse.append(line_directive)
 
-    def add_constant(adj, n):
-        output = adj.add_var(type=get_arg_type(n), constant=n)
-        return output
+    @staticmethod
+    def _is_numeric_literal(node):
+        """Check if an AST node is a numeric literal constant (int or float)."""
+        return isinstance(node, ast.Constant) and isinstance(node.value, (int, float))
+
+    def add_constant(adj, n, target_type=None):
+        """Add a constant variable with optional type override for precision preservation.
+
+        Args:
+            n: The constant value.
+            target_type: Override the inferred type (e.g., float64 for ``wp.float64(3.14)``).
+        """
+        if target_type is not None:
+            var_type = target_type
+            # Convert int value to float when target is a float type (e.g., wp.float64(2))
+            if is_strong_float(target_type) and isinstance(n, int) and not isinstance(n, builtins.bool):
+                n = float(n)
+        else:
+            var_type = get_arg_type(n)
+            # Convert int literals to int32 early — int is not weakly typed (unlike float).
+            if var_type is int:
+                var_type = int32
+
+        return adj.add_var(type=var_type, constant=n)
 
     def load(adj, var):
         if is_reference(var.type):
@@ -1517,11 +1581,18 @@ class Adjoint:
 
         for op, comp in zip(op_strings, comps):
             comp_chainable = op_str_is_chainable(op)
+            casted_comp = comp
             if comp_chainable and prev_comp_var:
+                # Cast weakly-typed float to match strongly-typed float (GH-485)
+                if is_weak_float(prev_comp_var.type) and is_strong_float(comp.type):
+                    prev_comp_var = adj._cast_to(prev_comp_var, comp.type)
+                elif is_weak_float(comp.type) and is_strong_float(prev_comp_var.type):
+                    casted_comp = adj._cast_to(comp, prev_comp_var.type)
+
                 # We restrict chaining to operands of the same type
-                if prev_comp_var.type is comp.type:
+                if prev_comp_var.type is casted_comp.type:
                     prev_comp_var = adj.load(prev_comp_var)
-                    comp_var = adj.load(comp)
+                    comp_var = adj.load(casted_comp)
                     s += "&& (" + prev_comp_var.emit() + " " + op + " " + comp_var.emit() + ")) "
                 else:
                     raise WarpCodegenTypeError(
@@ -1592,17 +1663,40 @@ class Adjoint:
 
                 arg_type_reprs.append(type_repr(arg_type))
 
-        raise WarpCodegenError(
+        raise WarpCodegenOverloadError(
             f"Couldn't find function overload for '{func.key}' that matched inputs with types: [{', '.join(arg_type_reprs)}]"
         )
 
     def add_call(adj, func, args, kwargs, type_args, min_outputs=None):
+        # User functions have annotated float → float32 params, so cast
+        # weakly-typed float args to float32 before resolution (GH-485).
+        if not func.is_builtin() and any(is_weak_float(get_arg_type(a)) for a in args):
+            args = tuple(adj._cast_to(a, float32) if is_weak_float(get_arg_type(a)) else a for a in args)
+
         # Extract the types and values passed as arguments to the function call.
         arg_types = tuple(get_arg_type(x) for x in args)
         kwarg_types = {k: get_arg_type(v) for k, v in kwargs.items()}
 
-        # Resolve the exact function signature among any existing overload.
-        func = adj.resolve_func(func, arg_types, kwarg_types, min_outputs)
+        try:
+            func = adj.resolve_func(func, arg_types, kwarg_types, min_outputs)
+        except WarpCodegenOverloadError:
+            # If resolution fails and there are weakly-typed float args, cast them
+            # to float32 and retry. This handles builtins with only concrete overloads
+            # (e.g., expect_eq) that don't have generic Float/Scalar overloads.
+            has_float_args = any(is_weak_float(t) for t in arg_types)
+            has_float_kwargs = any(is_weak_float(t) for t in kwarg_types.values())
+            if has_float_args or has_float_kwargs:
+                if has_float_args:
+                    args = tuple(adj._cast_to(a, float32) if is_weak_float(get_arg_type(a)) else a for a in args)
+                    arg_types = tuple(get_arg_type(x) for x in args)
+                if has_float_kwargs:
+                    kwargs = {
+                        k: adj._cast_to(v, float32) if is_weak_float(get_arg_type(v)) else v for k, v in kwargs.items()
+                    }
+                    kwarg_types = {k: get_arg_type(v) for k, v in kwargs.items()}
+                func = adj.resolve_func(func, arg_types, kwarg_types, min_outputs)
+            else:
+                raise
 
         # Bind the positional and keyword arguments to the function's signature
         # in order to process them as Python does it.
@@ -1632,12 +1726,12 @@ class Adjoint:
                         f"`wp.{func.native_func}()`"
                     )
 
-            type_vars = {k: Var(None, type=type(v), constant=v) for k, v in type_args.items()}
+            type_vars = {k: Var(None, type=canonicalize_dtype(type(v)), constant=v) for k, v in type_args.items()}
             apply_defaults(bound_args, type_vars)
 
         if func.defaults:
             default_vars = {
-                k: Var(None, type=type(v), constant=v)
+                k: Var(None, type=canonicalize_dtype(type(v)), constant=v)
                 for k, v in func.defaults.items()
                 if k not in bound_args.arguments and v is not None
             }
@@ -1665,6 +1759,23 @@ class Adjoint:
                     adj.builder.deferred_functions.append(func.custom_grad_func)
                 if func.custom_replay_func:
                     adj.builder.deferred_functions.append(func.custom_replay_func)
+
+        # Cast weakly-typed float args to match the strongest typed float in the call.
+        # When all args are weakly typed, skip — they stay as C++ double for precision.
+        float_target = adj._resolve_float_target(bound_args)
+        if float_target is not None:
+
+            def _cast_val(val):
+                if isinstance(val, Var) and is_weak_float(get_arg_type(val)):
+                    return adj._cast_to(val, float_target)
+                if isinstance(val, tuple):
+                    return tuple(
+                        adj._cast_to(x, float_target) if isinstance(x, Var) and is_weak_float(get_arg_type(x)) else x
+                        for x in val
+                    )
+                return val
+
+            bound_args = {k: _cast_val(v) for k, v in bound_args.items()}
 
         # Resolve the return value based on the types and values of the given arguments.
         bound_arg_types = {k: get_arg_type(v) for k, v in bound_args.items()}
@@ -1696,6 +1807,11 @@ class Adjoint:
             if isinstance(return_type, Sequence):
                 return_type = return_type[0]
             output = adj.add_var(return_type)
+            # Restore weakly-typed float if Var.__init__ converted it to float32,
+            # but NOT for scalar type constructors which produce strongly-typed values.
+            scalar_constructor_keys = {"float", "int", "bool", *(t.__name__ for t in scalar_types)}
+            if is_weak_float(return_type) and func.key not in scalar_constructor_keys:
+                output.type = float
             output_list = [output]
         else:
             # multiple return value function
@@ -1798,8 +1914,141 @@ class Adjoint:
 
         return output
 
+    @staticmethod
+    def _float_types_compatible(a, b):
+        """True if *a* and *b* are compatible via weak float typing.
+
+        Returns True when one type is weakly-typed float and the other is
+        strongly-typed float — meaning assignment between them is allowed.
+        """
+        return (is_weak_float(a) and is_strong_float(b)) or (is_weak_float(b) and is_strong_float(a))
+
+    @staticmethod
+    def _resolve_float_target(bound_args):
+        """Find the target float precision from strongly-typed arguments.
+
+        Checks (in order): direct scalar type, compound scalar type
+        (``_wp_scalar_type_``), array/tile dtype, then the ``dtype`` keyword
+        argument.  Returns None when all arguments are weakly typed.
+        """
+
+        def _iter_vars(args):
+            """Yield all Vars from bound args, including those inside variadic tuples."""
+            for var in args.values():
+                if isinstance(var, Var):
+                    yield var
+                elif isinstance(var, tuple):
+                    yield from (x for x in var if isinstance(x, Var))
+
+        for var in _iter_vars(bound_args):
+            var_type = get_arg_type(var)
+            if is_strong_float(var_type):
+                return var_type
+            scalar_type = getattr(var_type, "_wp_scalar_type_", None)
+            if is_strong_float(scalar_type):
+                return scalar_type
+            elem_dtype = getattr(var_type, "dtype", None)
+            if is_strong_float(elem_dtype):
+                return elem_dtype
+            if is_weak_float(elem_dtype):
+                return float32
+
+        # Check the dtype keyword argument as a last resort
+        dtype_kwarg = bound_args.get("dtype")
+        if dtype_kwarg is not None:
+            dtype_value = getattr(dtype_kwarg, "constant", dtype_kwarg) if isinstance(dtype_kwarg, Var) else dtype_kwarg
+            if isinstance(dtype_value, type):
+                dtype_canonical = warp._src.types.canonicalize_dtype(dtype_value)
+                if is_strong_float(dtype_canonical):
+                    return dtype_canonical
+
+        return None
+
+    def _cast_to(adj, arg, target_type):
+        """Cast weakly-typed float or other arg to *target_type*.
+
+        For constants with known values, creates a new constant at the target
+        precision.  For computed values, aliases as float64 (weakly-typed float
+        emits as C++ ``double``) and applies a scalar cast builtin.
+        """
+        if is_weak_float(get_arg_type(arg)):
+            if getattr(arg, "constant", None) is not None:
+                return adj.add_constant(arg.constant, target_type=target_type)
+            # Weakly-typed float emits as C++ double. Alias as float64 for cast resolution.
+            alias = Var(arg.label, type=float64)
+            return adj.add_builtin_call(target_type.__name__, [alias])
+        return adj.add_builtin_call(target_type.__name__, [arg])
+
     def add_builtin_call(adj, func_name, args, min_outputs=None):
         func = warp._src.context.builtin_functions[func_name]
+
+        # --- Weak typing: cast float precision mismatches before dispatch ---
+
+        # Binary operations: cast scalar to match compound type's scalar precision
+        if func.sametypes and len(args) == 2:
+            # Determine if either operand is a compound type (tile, vector, matrix, etc.)
+            compound_scalar_type = None
+            scalar_arg_index = None
+            for check_idx, other_idx in ((0, 1), (1, 0)):
+                check_type = get_arg_type(args[check_idx])
+                if hasattr(check_type, "dtype"):  # tile
+                    compound_scalar_type = getattr(check_type.dtype, "_wp_scalar_type_", check_type.dtype)
+                    scalar_arg_index = other_idx
+                    break
+                elif hasattr(check_type, "_wp_scalar_type_"):  # vector/matrix/quat/transform
+                    compound_scalar_type = check_type._wp_scalar_type_
+                    scalar_arg_index = other_idx
+                    break
+
+            if compound_scalar_type is not None and scalar_arg_index is not None:
+                scalar_type = get_arg_type(args[scalar_arg_index])
+                if is_weak_float(scalar_type) and is_strong_float(compound_scalar_type):
+                    casted = adj._cast_to(args[scalar_arg_index], compound_scalar_type)
+                    args = list(args)
+                    args[scalar_arg_index] = casted
+                    args = tuple(args)
+
+        # Store/array_store: cast weakly-typed float value to match target type
+        if func_name == "store" and len(args) == 2:
+            addr_type = get_arg_type(args[0])
+            elem_type = addr_type.value_type if is_reference(addr_type) else addr_type
+            val_type = get_arg_type(args[1])
+            if is_weak_float(val_type) and is_strong_float(elem_type):
+                args = (args[0], adj._cast_to(args[1], elem_type))
+        if func_name in ("array_store", "atomic_add", "atomic_sub", "atomic_min", "atomic_max") and len(args) >= 2:
+            arr_type = get_arg_type(args[0])
+            if hasattr(arr_type, "dtype"):
+                elem_type = arr_type.dtype
+                val_type = get_arg_type(args[-1])
+                if is_weak_float(val_type) and is_strong_float(elem_type):
+                    args = (*args[:-1], adj._cast_to(args[-1], elem_type))
+        # assign_inplace/assign_copy: cast weakly-typed float to match target's scalar type
+        if func_name in ("assign_inplace", "assign_copy") and len(args) >= 3:
+            target_type = get_arg_type(args[0])
+            scalar_type = getattr(target_type, "_wp_scalar_type_", None)
+            val_type = get_arg_type(args[-1])
+            if is_weak_float(val_type) and is_strong_float(scalar_type):
+                args = (*args[:-1], adj._cast_to(args[-1], scalar_type))
+
+        # Where (ternary): cast weakly-typed float branches to match strongly-typed ones
+        if func_name == "where" and len(args) == 3:
+            true_type = get_arg_type(args[1])
+            false_type = get_arg_type(args[2])
+            if true_type is not false_type and (is_weak_float(true_type) or is_weak_float(false_type)):
+                if is_strong_float(true_type):
+                    float_target = true_type
+                elif is_strong_float(false_type):
+                    float_target = false_type
+                else:
+                    float_target = None
+                if float_target is not None:
+                    cond = args[0]
+                    t_val = adj._cast_to(args[1], float_target) if is_weak_float(true_type) else args[1]
+                    f_val = adj._cast_to(args[2], float_target) if is_weak_float(false_type) else args[2]
+                    args = (cond, t_val, f_val)
+
+        # --- End weak typing ---
+
         return adj.add_call(func, args, {}, {}, min_outputs=min_outputs)
 
     def add_grad_call(adj, func, args, kwargs):
@@ -1854,7 +2103,7 @@ class Adjoint:
         bound_args = func.signature.bind(*args, **kwargs)
         if func.defaults:
             default_vars = {
-                k: Var(None, type=type(v), constant=v)
+                k: Var(None, type=canonicalize_dtype(type(v)), constant=v)
                 for k, v in func.defaults.items()
                 if k not in bound_args.arguments and v is not None
             }
@@ -2438,29 +2687,60 @@ class Adjoint:
     def emit_Constant(adj, node):
         if node.value is None:
             raise WarpCodegenTypeError("None type unsupported")
-        else:
-            return adj.add_constant(node.value)
+        return adj.add_constant(node.value)
+
+    def _get_constructor_target_type(adj, func, caller, node):
+        """Determine target scalar type for arguments in type constructors.
+
+        Enables precision-preserving conversions for both literals and
+        weakly-typed values (e.g., module constants like ``wp.PI``):
+        - ``wp.float64(3.14)`` → float64 constant (not float32 then cast)
+        - ``wp.float64(wp.PI)`` → wp.PI cast to float64 (not float32)
+        - ``wp.vec3d(1.1, 2.2, 3.3)`` → three float64 constants
+        - ``wp.vec3d(1, 2, 3)`` → three float64 constants from ints
+
+        Returns the target Warp scalar type, or None for non-constructor calls.
+        """
+        # Typed compound constructor (vec3f, mat22d, etc.) → use its scalar type
+        scalar_type = getattr(caller, "_wp_scalar_type_", None)
+        if scalar_type in scalar_types:
+            return scalar_type
+
+        # Scalar constructor (wp.float64, wp.float16, float, etc.)
+        # Checked before the numeric-literal guard because scalar constructors
+        # are unambiguously identified by func.key and must preserve precision
+        # even for non-literal args like module constants (e.g., wp.float64(wp.PI)).
+        scalar_constructor_keys = {t.__name__ for t in scalar_types} | {"float", "int", "bool"}
+        if len(node.args) == 1 and not node.keywords and getattr(func, "key", None) in scalar_constructor_keys:
+            value_type = getattr(func, "value_type", None)
+            if value_type is not None:
+                canonical = warp._src.types.canonicalize_dtype(value_type)
+                if canonical in scalar_types:
+                    return canonical
+
+        # Generic constructor (vector, matrix, quaternion, transformation) without
+        # explicit dtype kwarg — default to float32 when all positional args are
+        # float literals. This ensures the constructor produces a concrete type.
+        if func and hasattr(func, "key") and func.key in ("vector", "matrix", "quaternion", "transformation"):
+            if not any(kw.arg == "dtype" for kw in node.keywords):
+                if node.args and all(
+                    isinstance(a, ast.Constant) and isinstance(a.value, builtins.float) for a in node.args
+                ):
+                    return float32
+
+        return None
 
     def emit_BinOp(adj, node):
-        # evaluate binary operator arguments
-
+        # Weakly-typed float casting is handled downstream in add_call/add_builtin_call.
         if warp.config.verify_autograd_array_access:
-            # array overwrite tracking: in-place operators are a special case
-            # x[tid] = x[tid] + 1 is a read followed by a write, but we only want to record the write
-            # so we save the current arg read flags and restore them after lhs eval
-            is_read_states = []
-            for arg in adj.args:
-                is_read_states.append(arg.is_read)
-
-        # evaluate lhs binary operator argument
+            # Array overwrite tracking: in-place operators are a special case.
+            # x[tid] = x[tid] + 1 is a read followed by a write, but we only
+            # want to record the write, so save/restore read flags around lhs.
+            is_read_states = [arg.is_read for arg in adj.args]
         left = adj.eval(node.left)
-
         if warp.config.verify_autograd_array_access:
-            # restore arg read flags
             for i, arg in enumerate(adj.args):
                 arg.is_read = is_read_states[i]
-
-        # evaluate rhs binary operator argument
         right = adj.eval(node.right)
 
         name = builtin_operators[type(node.op)]
@@ -2470,7 +2750,7 @@ class Adjoint:
             user_func = adj.resolve_external_reference(name)
             if isinstance(user_func, warp._src.context.Function):
                 return adj.add_call(user_func, (left, right), {}, {})
-        except WarpCodegenError:
+        except WarpCodegenOverloadError:
             pass
 
         return adj.add_builtin_call(name, [left, right])
@@ -2479,10 +2759,11 @@ class Adjoint:
         # evaluate unary op arguments
         arg = adj.eval(node.operand)
 
-        # evaluate expression to a compile-time constant if arg is a constant
+        # Evaluate unary minus on a constant to a compile-time constant,
+        # preserving the operand's type (e.g., weakly-typed float stays float).
         if arg.constant is not None and math.isfinite(arg.constant):
             if isinstance(node.op, ast.USub):
-                return adj.add_constant(-arg.constant)
+                return adj.add_constant(-arg.constant, target_type=arg.type)
 
         name = builtin_operators[type(node.op)]
 
@@ -2916,6 +3197,7 @@ class Adjoint:
             return adj.add_grad_call(func.func, args, kwargs)
 
         type_args = {}
+        caller = None
 
         if len(path) > 0 and not isinstance(func, warp._src.context.Function):
             attr = path[-1]
@@ -2980,6 +3262,9 @@ class Adjoint:
         if hasattr(node, "expects"):
             min_outputs = node.expects
 
+        # Detect constructor target type for precision-preserving constant creation.
+        target_type = adj._get_constructor_target_type(func, caller, node)
+
         # Evaluate positional arguments.
         args = []
         for x in node.args:
@@ -2987,11 +3272,37 @@ class Adjoint:
                 # Handle starred expressions by unpacking them into multiple arguments.
                 unpacked = adj.unpack_starred(x)
                 args.extend(unpacked)
+            elif target_type is not None and isinstance(x, ast.Constant):
+                # Create constant with constructor's target type to preserve precision
+                args.append(adj.add_constant(x.value, target_type=target_type))
             else:
-                args.append(adj.resolve_arg(x))
+                arg = adj.resolve_arg(x)
+                # Cast weakly-typed float args to match constructor's target type
+                if target_type is not None and is_weak_float(get_arg_type(arg)):
+                    arg = adj._cast_to(arg, target_type)
+                args.append(arg)
 
         # Evaluate keyword arguments.
         kwargs = {x.arg: adj.resolve_arg(x.value) for x in node.keywords}
+
+        # For compound constructors, cast weakly-typed float and int args to the target dtype.
+        if func and func.key in ("vector", "matrix", "quaternion", "transformation"):
+            # Convert Python builtins in dtype kwarg (float→float32, int→int32)
+            if "dtype" in kwargs and kwargs["dtype"] in (float, int):
+                kwargs["dtype"] = canonicalize_dtype(kwargs["dtype"])
+            cast_target = kwargs.get("dtype")
+            if not cast_target and is_strong_float(target_type):
+                cast_target = target_type
+
+            if is_strong_float(cast_target):
+                casted_args = []
+                for arg in args:
+                    arg_type = get_arg_type(arg)
+                    if is_weak_float(arg_type) or arg_type in int_types:
+                        casted_args.append(adj._cast_to(arg, cast_target))
+                    else:
+                        casted_args.append(arg)
+                args = casted_args
 
         out = adj.add_call(func, args, kwargs, type_args, min_outputs=min_outputs)
 
@@ -3229,10 +3540,12 @@ class Adjoint:
             out = rhs
             for name, rhs in zip(names, out):
                 if name in adj.symbols:
-                    if not types_equal(rhs.type, adj.symbols[name].type):
-                        raise WarpCodegenTypeError(
-                            f"Error, assigning to existing symbol {name} ({adj.symbols[name].type}) with different type ({rhs.type})"
-                        )
+                    existing_type = adj.symbols[name].type
+                    if not types_equal(rhs.type, existing_type):
+                        if not adj._float_types_compatible(rhs.type, existing_type):
+                            raise WarpCodegenTypeError(
+                                f"Error, assigning to existing symbol {name} ({existing_type}) with different type ({rhs.type})"
+                            )
 
                 adj.symbols[name] = rhs
 
@@ -3321,10 +3634,18 @@ class Adjoint:
 
             # check type matches if symbol already defined
             if name in adj.symbols:
-                if not types_equal(strip_reference(rhs.type), adj.symbols[name].type):
-                    raise WarpCodegenTypeError(
-                        f"Error, assigning to existing symbol {name} ({adj.symbols[name].type}) with different type ({rhs.type})"
-                    )
+                existing_type = adj.symbols[name].type
+                rhs_type = strip_reference(rhs.type)
+                if not types_equal(rhs_type, existing_type):
+                    # Auto-cast weakly-typed float reassignment
+                    if is_weak_float(rhs_type) and is_strong_float(existing_type):
+                        rhs = adj._cast_to(rhs, existing_type)
+                    elif is_weak_float(existing_type) and is_strong_float(rhs_type):
+                        pass  # Existing var was weakly typed, now strongly typed
+                    else:
+                        raise WarpCodegenTypeError(
+                            f"Error, assigning to existing symbol {name} ({existing_type}) with different type ({rhs.type})"
+                        )
 
             if isinstance(node.value, ast.Tuple):
                 out = rhs
@@ -3400,14 +3721,47 @@ class Adjoint:
                 var = (var,)
 
         if adj.return_var is not None:
+            # Cast weakly-typed float returns to match previous return's types
+            if len(var) == len(adj.return_var):
+                var = tuple(
+                    adj._cast_to(v, adj.return_var[i].type)
+                    if is_weak_float(v.type) and is_strong_float(adj.return_var[i].type)
+                    else v
+                    for i, v in enumerate(var)
+                )
             old_ctypes = tuple(v.ctype(value_type=True) for v in adj.return_var)
             new_ctypes = tuple(v.ctype(value_type=True) for v in var)
             if old_ctypes != new_ctypes:
-                raise WarpCodegenTypeError(
-                    f"Error, function returned different types, previous: [{', '.join(old_ctypes)}], new [{', '.join(new_ctypes)}]"
-                )
+                # Check if the mismatch is just weak float vs strongly-typed float — if so,
+                # the first return was weak float (C++ double). Re-type it to match.
+                if all(
+                    (oc == nc) or (oc == "double" and nc in ("wp::float32", "wp::float64", "wp::float16"))
+                    for oc, nc in zip(old_ctypes, new_ctypes)
+                ):
+                    adj.return_var = tuple(
+                        Var(v.label, type=var[i].type) if is_weak_float(v.type) else v
+                        for i, v in enumerate(adj.return_var)
+                    )
+                else:
+                    raise WarpCodegenTypeError(
+                        f"Error, function returned different types, previous: [{', '.join(old_ctypes)}], new [{', '.join(new_ctypes)}]"
+                    )
 
         if var is not None:
+            # Cast weakly-typed float returns to match the annotated return type
+            if "return" in adj.arg_types:
+                ann_ret = adj.arg_types["return"]
+                ann_types = get_args(ann_ret) if get_origin(ann_ret) is tuple else (ann_ret,)
+                if len(ann_types) == len(var):
+                    var = tuple(
+                        adj._cast_to(v, at) if is_weak_float(v.type) and is_strong_float(at) else v
+                        for v, at in zip(var, ann_types)
+                    )
+
+            # When no return annotation, cast weakly-typed float to float32
+            if "return" not in adj.arg_types:
+                var = tuple(adj._cast_to(v, float32) if is_weak_float(v.type) else v for v in var)
+
             adj.return_var = ()
             for ret in var:
                 if is_reference(ret.type):
@@ -3454,18 +3808,21 @@ class Adjoint:
                     result = adj.add_call(user_func, (target, rhs), {}, {})
                     adj.symbols[lhs.id] = result
                     return
-            except WarpCodegenError:
+            except WarpCodegenOverloadError:
                 pass
 
             result = adj.add_builtin_call(op_name, [target, rhs])
 
             # Validate type consistency (same as emit_Assign for Name targets).
             if lhs.id in adj.symbols:
-                if not types_equal(strip_reference(result.type), adj.symbols[lhs.id].type):
-                    raise WarpCodegenTypeError(
-                        f"Error, augmented assignment to `{lhs.id}` ({adj.symbols[lhs.id].type}) "
-                        f"produces different type ({result.type})"
-                    )
+                existing_type = adj.symbols[lhs.id].type
+                result_type = strip_reference(result.type)
+                if not types_equal(result_type, existing_type):
+                    if not adj._float_types_compatible(result_type, existing_type):
+                        raise WarpCodegenTypeError(
+                            f"Error, augmented assignment to `{lhs.id}` ({existing_type}) "
+                            f"produces different type ({result_type})"
+                        )
 
             adj.symbols[lhs.id] = result
             return
