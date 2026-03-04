@@ -3546,7 +3546,11 @@ class Adjoint:
                 if name in adj.symbols:
                     existing_type = adj.symbols[name].type
                     if not types_equal(rhs.type, existing_type):
-                        if not adj._float_types_compatible(rhs.type, existing_type):
+                        if is_weak_float(rhs.type) and is_strong_float(existing_type):
+                            rhs = adj._cast_to(rhs, existing_type)
+                        elif is_weak_float(existing_type) and is_strong_float(rhs.type):
+                            pass  # Existing var was weakly typed, now strongly typed
+                        else:
                             raise WarpCodegenTypeError(
                                 f"Error, assigning to existing symbol {name} ({existing_type}) with different type ({rhs.type})"
                             )

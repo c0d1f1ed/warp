@@ -1176,6 +1176,25 @@ def test_vector_dtype_float_is_float32(test, device):
     np.testing.assert_allclose(result.numpy()[0], [1.0, 2.0, 3.0])
 
 
+@wp.kernel
+def test_multi_assign_weak_to_strong_kernel(result: wp.array(dtype=wp.float64)):
+    """Multi-assignment: weak float literals cast to match existing strong-float symbols."""
+    x = wp.float64(0.0)
+    y = wp.float64(0.0)
+    x, y = 3.141592653589793, 2.718281828459045
+    result[0] = x
+    result[1] = y
+
+
+def test_multi_assign_weak_to_strong(test, device):
+    result = wp.zeros(2, dtype=wp.float64, device=device)
+    wp.launch(test_multi_assign_weak_to_strong_kernel, dim=1, inputs=[result], device=device)
+    expected_pi = 3.141592653589793
+    expected_e = 2.718281828459045
+    np.testing.assert_allclose(result.numpy()[0], expected_pi, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(result.numpy()[1], expected_e, rtol=0.0, atol=0.0)
+
+
 class TestConstantPrecision(unittest.TestCase):
     """Test suite for constant precision preservation."""
 
@@ -1427,6 +1446,9 @@ add_function_test(
 )
 add_function_test(
     TestConstantPrecision, "test_vector_dtype_float_is_float32", test_vector_dtype_float_is_float32, devices=devices
+)
+add_function_test(
+    TestConstantPrecision, "test_multi_assign_weak_to_strong", test_multi_assign_weak_to_strong, devices=devices
 )
 
 
