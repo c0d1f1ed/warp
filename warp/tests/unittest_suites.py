@@ -139,6 +139,7 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
     from warp.tests.test_codegen_instancing import TestCodeGenInstancing
     from warp.tests.test_compile_consts import TestConstants
     from warp.tests.test_conditional import TestConditional
+    from warp.tests.test_constant_precision import TestConstantPrecision
     from warp.tests.test_context import TestContext
     from warp.tests.test_copy import TestCopy
     from warp.tests.test_ctypes import TestCTypes
@@ -237,6 +238,7 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
         TestCodeGen,
         TestCodeGenInstancing,
         TestConditional,
+        TestConstantPrecision,
         TestConstants,
         TestContext,
         TestCopy,
@@ -376,6 +378,7 @@ def kit_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader):
     from warp.tests.test_coloring import TestColoring
     from warp.tests.test_compile_consts import TestConstants
     from warp.tests.test_conditional import TestConditional
+    from warp.tests.test_constant_precision import TestConstantPrecision
     from warp.tests.test_copy import TestCopy
     from warp.tests.test_ctypes import TestCTypes
     from warp.tests.test_devices import TestDevices
@@ -412,6 +415,7 @@ def kit_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader):
         TestBvh,
         TestCodeGen,
         TestColoring,
+        TestConstantPrecision,
         TestConstants,
         TestConditional,
         TestCopy,
