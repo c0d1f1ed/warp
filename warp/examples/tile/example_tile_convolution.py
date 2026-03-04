@@ -31,7 +31,7 @@ BLOCK_DIM = 64
 TILE_M = 1
 TILE_N = 128
 
-scale = wp.vec2d(wp.float64(1 / TILE_N), wp.float64(1 / TILE_N))
+scale = wp.vec2d(1 / TILE_N, 1 / TILE_N)
 
 
 @wp.func

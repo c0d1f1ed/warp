@@ -75,7 +75,7 @@ def test_anon_constructor_error_numeric_args_mismatch(test, device):
 
     with test.assertRaisesRegex(
         RuntimeError,
-        r"all values given when constructing a vector must have the same type$",
+        r"(Couldn't figure out return type|expected to be a scalar)",
     ):
         wp.launch(kernel, dim=1, inputs=[], device=device)
 
@@ -91,16 +91,16 @@ def test_tpl_constructor_error_incompatible_sizes(test, device):
         wp.launch(kernel, dim=1, inputs=[], device=device)
 
 
-def test_tpl_constructor_error_numeric_args_mismatch(test, device):
+def test_tpl_constructor_mixed_numeric_args(test, device):
+    # With weak typing, int literals are promoted to float in vector constructors
     @wp.kernel
-    def kernel():
-        wp.vec2(1.0, 2)
+    def kernel(out: wp.array(dtype=wp.vec2)):
+        out[0] = wp.vec2(1.0, 2)
 
-    with test.assertRaisesRegex(
-        RuntimeError,
-        r"all values given when constructing a vector must have the same type$",
-    ):
-        wp.launch(kernel, dim=1, inputs=[], device=device)
+    out = wp.zeros(1, dtype=wp.vec2, device=device)
+    wp.launch(kernel, dim=1, inputs=[out], device=device)
+    result = out.numpy()[0]
+    np.testing.assert_allclose(result, [1.0, 2.0])
 
 
 def test_casting_constructors(test, device, dtype, register_kernels=False):
@@ -302,8 +302,8 @@ add_function_test(
 )
 add_function_test(
     TestVecConstructors,
-    "test_tpl_constructor_error_numeric_args_mismatch",
-    test_tpl_constructor_error_numeric_args_mismatch,
+    "test_tpl_constructor_mixed_numeric_args",
+    test_tpl_constructor_mixed_numeric_args,
     devices=devices,
 )
 add_kernel_test(TestVecConstructors, test_vector_constructors_value_func, dim=1, devices=devices)

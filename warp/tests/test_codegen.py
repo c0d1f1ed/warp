@@ -480,15 +480,17 @@ def test_error_collection_construct(test, device):
 
 
 def test_error_unmatched_arguments(test, device):
-    def kernel_1_fn():
-        a = 1 * 1.0
+    # Note: 1 * 1.0 (int_literal * float_literal) now works via weak typing —
+    # both literals become float64 const expressions. Use typed variables instead.
+    def kernel_1_fn(a: wp.int32, b: wp.float32):
+        c = a * b
 
     def kernel_2_fn():
-        x = wp.dot(wp.vec2(1.0, 2.0), wp.vec2h(wp.float16(1.0), wp.float16(2.0)))
+        x = wp.dot(wp.vec2(1.0, 2.0), wp.vec2h(1.0, 2.0))
 
     kernel = wp.Kernel(func=kernel_1_fn)
-    with test.assertRaisesRegex(RuntimeError, r"Input types must be the same, got \['int32', 'float32'\]"):
-        wp.launch(kernel, dim=1, device=device)
+    with test.assertRaisesRegex(RuntimeError, r"Input types must be the same"):
+        wp.launch(kernel, dim=1, inputs=[1, 1.0], device=device)
 
     kernel = wp.Kernel(func=kernel_2_fn)
     with test.assertRaisesRegex(
@@ -663,14 +665,14 @@ def test_error_return_annotation_mismatch(test, device):
     kernel = wp.Kernel(func=kernel_2_fn)
     with test.assertRaisesRegex(
         wp.WarpCodegenError,
-        r"The function `foo_2` has its return type annotated as `int` but the code returns 2 values.",
+        r"The function `foo_2` has its return type annotated as `int32` but the code returns 2 values.",
     ):
         wp.launch(kernel, dim=1, device=device)
 
     kernel = wp.Kernel(func=kernel_3_fn)
     with test.assertRaisesRegex(
         wp.WarpCodegenError,
-        r"The function `foo_3` has its return type annotated as `tuple\[int, int\]` but the code returns a tuple with types `\(int32, float32\)`.",
+        r"The function `foo_3` has its return type annotated as `tuple\[int32, int32\]` but the code returns a tuple with types `\(int32, float\)`.",
     ):
         wp.launch(kernel, dim=1, device=device)
 

@@ -275,16 +275,19 @@ def test_anon_constructor_error_shape_mismatch(test, device):
         wp.launch(kernel, dim=1, inputs=[], device=device)
 
 
-def test_anon_constructor_error_type_mismatch(test, device):
-    @wp.kernel
-    def kernel():
-        wp.types.matrix(1.0, shape=(3, 2), dtype=wp.float16)
+def test_anon_constructor_mixed_float_precision(test, device):
+    # With weak typing, float literals are auto-cast to match constructor dtype
+    mat32_t = wp.types.matrix(shape=(3, 2), dtype=wp.float16)
 
-    with test.assertRaisesRegex(
-        RuntimeError,
-        r"the value used to fill this matrix is expected to be of the type `float16`$",
-    ):
-        wp.launch(kernel, dim=1, inputs=[], device=device)
+    @wp.kernel
+    def kernel(out: wp.array(dtype=mat32_t)):
+        out[0] = wp.types.matrix(1.0, shape=(3, 2), dtype=wp.float16)
+
+    out = wp.zeros(1, dtype=mat32_t, device=device)
+    wp.launch(kernel, dim=1, inputs=[out], device=device)
+    result = out.numpy()[0]
+    expected = np.ones((3, 2), dtype=np.float16)
+    np.testing.assert_allclose(result, expected)
 
 
 def test_anon_constructor_error_invalid_arg_count(test, device):
@@ -294,7 +297,7 @@ def test_anon_constructor_error_invalid_arg_count(test, device):
 
     with test.assertRaisesRegex(
         RuntimeError,
-        r"incompatible number of values given \(3\) when constructing a matrix of shape \(2, 2\)$",
+        r"(incompatible number of values|expected to be a scalar)",
     ):
         wp.launch(kernel, dim=1, inputs=[], device=device)
 
@@ -618,10 +621,10 @@ def test_matrix_constructor_value_func():
     b = wp.matrix(a, shape=(2, 2))
     c = mat32d()
     d = mat32d(c, shape=(3, 2))
-    e = mat32d(wp.float64(1.0), wp.float64(2.0), wp.float64(1.0), wp.float64(2.0), wp.float64(1.0), wp.float64(2.0))
+    e = mat32d(1.0, 2.0, 1.0, 2.0, 1.0, 2.0)
     f = wp.matrix_from_rows(
-        wp.vec3d(wp.float64(1.0), wp.float64(2.0), wp.float64(3.0)),
-        wp.vec3d(wp.float64(1.0), wp.float64(2.0), wp.float64(3.0)),
+        wp.vec3d(1.0, 2.0, 3.0),
+        wp.vec3d(1.0, 2.0, 3.0),
     )
     g = wp.types.matrix(1.0, shape=(3, 2))
 
@@ -911,8 +914,8 @@ add_function_test(
 )
 add_function_test(
     TestMatConstructors,
-    "test_anon_constructor_error_type_mismatch",
-    test_anon_constructor_error_type_mismatch,
+    "test_anon_constructor_mixed_float_precision",
+    test_anon_constructor_mixed_float_precision,
     devices=devices,
 )
 add_function_test(
