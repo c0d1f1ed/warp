@@ -187,7 +187,9 @@ the weak-typing intent self-documenting throughout the codebase. Use these
 instead of raw `t is float` / `t in float_types` checks in weak-typing logic.
 Related helpers in `builtins.py`: `_resolve_dtype_default()` (defaults weakly-
 typed float to `float32`) and `_check_dtype_mismatch()` (validates dtype
-compatibility while allowing weakly-typed float).
+compatibility while allowing weakly-typed float). Note that `type_str()` in
+`context.py` maps Python's `float` to `"float32"` so that error messages use
+the canonical Warp type name rather than exposing the internal representation.
 
 ## Testing Strategy
 

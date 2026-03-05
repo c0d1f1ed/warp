@@ -672,7 +672,7 @@ def test_error_return_annotation_mismatch(test, device):
     kernel = wp.Kernel(func=kernel_3_fn)
     with test.assertRaisesRegex(
         wp.WarpCodegenError,
-        r"The function `foo_3` has its return type annotated as `tuple\[int32, int32\]` but the code returns a tuple with types `\(int32, float\)`.",
+        r"The function `foo_3` has its return type annotated as `tuple\[int32, int32\]` but the code returns a tuple with types `\(int32, float32\)`.",
     ):
         wp.launch(kernel, dim=1, device=device)
 

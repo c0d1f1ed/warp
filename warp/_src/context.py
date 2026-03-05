@@ -8910,7 +8910,9 @@ def adj_copy(
 
 
 def type_str(t):
-    if t is None:
+    if t is float:
+        return "float32"
+    elif t is None:
         return "None"
     elif t == Any:
         return "Any"

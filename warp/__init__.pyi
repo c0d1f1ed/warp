@@ -4724,21 +4724,21 @@ def volume_store(id: uint64, i: int32, j: int32, k: int32, value: Any) -> None:
     """Store ``value`` at the voxel with coordinates ``i``, ``j``, ``k``."""
     ...
 
-def volume_sample_f(id: uint64, uvw: vec3f, sampling_mode: int32) -> float:
+def volume_sample_f(id: uint64, uvw: vec3f, sampling_mode: int32) -> float32:
     """Sample the volume given by ``id`` at the volume local-space point ``uvw``.
 
     Interpolation should be :attr:`warp.Volume.CLOSEST` or :attr:`warp.Volume.LINEAR`.
     """
     ...
 
-def volume_sample_grad_f(id: uint64, uvw: vec3f, sampling_mode: int32, grad: vec3f) -> float:
+def volume_sample_grad_f(id: uint64, uvw: vec3f, sampling_mode: int32, grad: vec3f) -> float32:
     """Sample the volume and its gradient given by ``id`` at the volume local-space point ``uvw``.
 
     Interpolation should be :attr:`warp.Volume.CLOSEST` or :attr:`warp.Volume.LINEAR`.
     """
     ...
 
-def volume_lookup_f(id: uint64, i: int32, j: int32, k: int32) -> float:
+def volume_lookup_f(id: uint64, i: int32, j: int32, k: int32) -> float32:
     """Query the value of voxel with coordinates ``i``, ``j``, ``k``.
 
     If the voxel at this index does not exist, this function returns the background value.
@@ -4995,7 +4995,7 @@ def randu(state: uint32, low: uint32, high: uint32) -> uint32:
     ...
 
 @over
-def randf(state: uint32) -> float:
+def randf(state: uint32) -> float32:
     """Generate a random float.
 
     Sample in the range [0.0, 1.0).
@@ -5003,14 +5003,14 @@ def randf(state: uint32) -> float:
     ...
 
 @over
-def randf(state: uint32, low: float32, high: float32) -> float:
+def randf(state: uint32, low: float32, high: float32) -> float32:
     """Generate a random float.
 
     Sample in the range [low, high).
     """
     ...
 
-def randn(state: uint32) -> float:
+def randn(state: uint32) -> float32:
     """Sample a normal (Gaussian) distribution of mean 0 and variance 1."""
     ...
 
@@ -5068,7 +5068,7 @@ def poisson(state: uint32, lam: float32) -> uint32:
     ...
 
 @over
-def noise(state: uint32, x: float32) -> float:
+def noise(state: uint32, x: float32) -> float32:
     """Non-periodic Perlin-style noise.
 
     Sample 1D noise.
@@ -5076,7 +5076,7 @@ def noise(state: uint32, x: float32) -> float:
     ...
 
 @over
-def noise(state: uint32, xy: vec2f) -> float:
+def noise(state: uint32, xy: vec2f) -> float32:
     """Non-periodic Perlin-style noise.
 
     Sample 2D noise.
@@ -5084,7 +5084,7 @@ def noise(state: uint32, xy: vec2f) -> float:
     ...
 
 @over
-def noise(state: uint32, xyz: vec3f) -> float:
+def noise(state: uint32, xyz: vec3f) -> float32:
     """Non-periodic Perlin-style noise.
 
     Sample 3D noise.
@@ -5092,7 +5092,7 @@ def noise(state: uint32, xyz: vec3f) -> float:
     ...
 
 @over
-def noise(state: uint32, xyzt: vec4f) -> float:
+def noise(state: uint32, xyzt: vec4f) -> float32:
     """Non-periodic Perlin-style noise.
 
     Sample 4D noise.
@@ -5100,7 +5100,7 @@ def noise(state: uint32, xyzt: vec4f) -> float:
     ...
 
 @over
-def pnoise(state: uint32, x: float32, px: int32) -> float:
+def pnoise(state: uint32, x: float32, px: int32) -> float32:
     """Periodic Perlin-style noise.
 
     Sample 1D noise.
@@ -5108,7 +5108,7 @@ def pnoise(state: uint32, x: float32, px: int32) -> float:
     ...
 
 @over
-def pnoise(state: uint32, xy: vec2f, px: int32, py: int32) -> float:
+def pnoise(state: uint32, xy: vec2f, px: int32, py: int32) -> float32:
     """Periodic Perlin-style noise.
 
     Sample 2D noise.
@@ -5116,7 +5116,7 @@ def pnoise(state: uint32, xy: vec2f, px: int32, py: int32) -> float:
     ...
 
 @over
-def pnoise(state: uint32, xyz: vec3f, px: int32, py: int32, pz: int32) -> float:
+def pnoise(state: uint32, xyz: vec3f, px: int32, py: int32, pz: int32) -> float32:
     """Periodic Perlin-style noise.
 
     Sample 3D noise.
@@ -5124,7 +5124,7 @@ def pnoise(state: uint32, xyz: vec3f, px: int32, py: int32, pz: int32) -> float:
     ...
 
 @over
-def pnoise(state: uint32, xyzt: vec4f, px: int32, py: int32, pz: int32, pt: int32) -> float:
+def pnoise(state: uint32, xyzt: vec4f, px: int32, py: int32, pz: int32, pt: int32) -> float32:
     """Periodic Perlin-style noise.
 
     Sample 4D noise.
