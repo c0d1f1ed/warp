@@ -2632,6 +2632,16 @@ def scalars_equal_generic(a, b, match_generic=True):
         if a is Float and b is Float:
             return True
 
+    # Weak int is canonically equivalent to int32 in all contexts — there are
+    # no specialized int overloads that would cause precision issues.
+    # Weak float is only equivalent to float32 in structural equality (not
+    # match_generic) to prevent specialized overloads like pow(float32, float32)
+    # from capturing weak float args before the generic pow(Float, Float).
+    if a is not b:
+        if is_weak_int(a) or is_weak_int(b):
+            return canonicalize_dtype(a) is canonicalize_dtype(b)
+        if not match_generic and (is_weak_float(a) or is_weak_float(b)):
+            return canonicalize_dtype(a) is canonicalize_dtype(b)
     return a is b
 
 
@@ -2639,7 +2649,9 @@ def seq_match_ellipsis(a, b) -> bool:
     assert a and a[-1] is Ellipsis and len(a) == 2
 
     # Compare the args against the type being repeated through the ellipsis.
-    repeated_arg = a[0]
+    # Canonicalize Python builtins (int, float) so that e.g. tuple[int, ...]
+    # matches tuple[int32, int32] in builtin signatures.
+    repeated_arg = canonicalize_dtype(a[0])
     if not all(types_equal_generic(x, repeated_arg) for x in b):
         return False
 
@@ -2696,7 +2708,11 @@ def types_equal_generic(a, b, match_generic=True):
             # A sequence can only match to another sequence.
             return False
 
-    # Convert bool to canonical Warp type (NOT float or int — they're weakly typed).
+    # Convert bool to canonical Warp type.
+    # Note: Python's float and int are NOT converted — they represent weakly-typed
+    # literals that must remain distinguishable from float32/int32 for overload
+    # resolution (specialized float32 overloads must not match weak float args).
+    # Tuple matching (seq_match_ellipsis) canonicalizes separately.
     if a is builtins.bool:
         a = bool
 

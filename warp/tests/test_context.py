@@ -20,13 +20,13 @@ import warp as wp
 
 class TestContext(unittest.TestCase):
     def test_context_type_str(self):
-        self.assertEqual(wp._src.context.type_str(list[int]), "list[int]")
+        self.assertEqual(wp._src.context.type_str(list[int]), "list[int32]")
         self.assertEqual(wp._src.context.type_str(list[float]), "list[float32]")
 
-        self.assertEqual(wp._src.context.type_str(tuple[int]), "tuple[int]")
+        self.assertEqual(wp._src.context.type_str(tuple[int]), "tuple[int32]")
         self.assertEqual(wp._src.context.type_str(tuple[float]), "tuple[float32]")
-        self.assertEqual(wp._src.context.type_str(tuple[int, float]), "tuple[int, float32]")
-        self.assertEqual(wp._src.context.type_str(tuple[int, ...]), "tuple[int, ...]")
+        self.assertEqual(wp._src.context.type_str(tuple[int, float]), "tuple[int32, float32]")
+        self.assertEqual(wp._src.context.type_str(tuple[int, ...]), "tuple[int32, ...]")
 
 
 if __name__ == "__main__":

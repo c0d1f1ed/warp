@@ -1303,9 +1303,8 @@ class TestConstantPrecision(unittest.TestCase):
         wp.launch(kernel, dim=1, inputs=[result], device="cpu")
         self.assertEqual(float(result.numpy()[0]), 3.0)
 
-    @unittest.expectedFailure
     def test_negative_int_literal(self):
-        """int64 negative literal range — not yet implemented."""
+        """int64 negative literal range preserves full precision."""
 
         @wp.kernel
         def kernel(
