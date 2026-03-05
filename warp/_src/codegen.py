@@ -3743,7 +3743,7 @@ class Adjoint:
                     for oc, nc in zip(old_ctypes, new_ctypes)
                 ):
                     adj.return_var = tuple(
-                        Var(v.label, type=var[i].type) if is_weak_float(v.type) else v
+                        Var(v.label, type=var[i].type) if is_weak_float(v.type) and is_strong_float(var[i].type) else v
                         for i, v in enumerate(adj.return_var)
                     )
                 else:
