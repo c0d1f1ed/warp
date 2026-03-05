@@ -1665,8 +1665,13 @@ class Adjoint:
     def add_call(adj, func, args, kwargs, type_args, min_outputs=None):
         # User functions have annotated float → float32 params, so cast
         # weakly-typed float args to float32 before resolution (GH-485).
-        if not func.is_builtin() and any(is_weak_float(get_arg_type(a)) for a in args):
-            args = tuple(adj._cast_to(a, float32) if is_weak_float(get_arg_type(a)) else a for a in args)
+        if not func.is_builtin():
+            if any(is_weak_float(get_arg_type(a)) for a in args):
+                args = tuple(adj._cast_to(a, float32) if is_weak_float(get_arg_type(a)) else a for a in args)
+            if any(is_weak_float(get_arg_type(v)) for v in kwargs.values()):
+                kwargs = {
+                    k: adj._cast_to(v, float32) if is_weak_float(get_arg_type(v)) else v for k, v in kwargs.items()
+                }
 
         # Extract the types and values passed as arguments to the function call.
         arg_types = tuple(get_arg_type(x) for x in args)

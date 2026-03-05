@@ -1258,6 +1258,23 @@ def test_augmented_array_store(test, device):
     np.testing.assert_allclose(arr.numpy()[0], expected, rtol=0.0, atol=0.0)
 
 
+@wp.func
+def _user_func_kwarg(x: wp.float32) -> wp.float32:
+    return x + wp.float32(1.0)
+
+
+@wp.kernel
+def test_user_func_kwarg_weak_float_kernel(result: wp.array(dtype=wp.float32)):
+    """User function called with a weak float keyword argument adapts to float32."""
+    result[0] = _user_func_kwarg(x=2.5)
+
+
+def test_user_func_kwarg_weak_float(test, device):
+    result = wp.zeros(1, dtype=wp.float32, device=device)
+    wp.launch(test_user_func_kwarg_weak_float_kernel, dim=1, inputs=[result], device=device)
+    np.testing.assert_allclose(result.numpy()[0], 3.5, rtol=1e-6)
+
+
 class TestConstantPrecision(unittest.TestCase):
     """Test suite for constant precision preservation."""
 
@@ -1519,6 +1536,9 @@ add_function_test(
 add_function_test(TestConstantPrecision, "test_where_weak_float", test_where_weak_float, devices=devices)
 add_function_test(TestConstantPrecision, "test_comparison_weak_strong", test_comparison_weak_strong, devices=devices)
 add_function_test(TestConstantPrecision, "test_augmented_array_store", test_augmented_array_store, devices=devices)
+add_function_test(
+    TestConstantPrecision, "test_user_func_kwarg_weak_float", test_user_func_kwarg_weak_float, devices=devices
+)
 
 
 if __name__ == "__main__":
