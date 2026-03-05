@@ -556,13 +556,17 @@ add_builtin(
 
 
 def _resolve_dtype_default(value_type):
-    """Default weakly-typed float to float32 for constructor dtype inference."""
-    return float32 if is_weak_float(value_type) else value_type
+    """Default weakly-typed values to float32/int32 for constructor dtype inference."""
+    if is_weak_float(value_type):
+        return float32
+    if is_weak_int(value_type):
+        return int32
+    return value_type
 
 
 def _check_dtype_mismatch(value_type, dtype):
-    """True if *value_type* is incompatible with *dtype* (weakly-typed float is always compatible)."""
-    return not is_weak_float(value_type) and not warp._src.types.scalars_equal(value_type, dtype)
+    """True if *value_type* is incompatible with *dtype* (weakly-typed values are always compatible)."""
+    return not is_weak_type(value_type) and not warp._src.types.scalars_equal(value_type, dtype)
 
 
 def scalar_infer_type(arg_types: Mapping[str, type] | tuple[type, ...] | None):
@@ -580,12 +584,23 @@ def scalar_infer_type(arg_types: Mapping[str, type] | tuple[type, ...] | None):
             scalar_types_found.add(t)
         elif is_weak_float(t):
             scalar_types_found.add(float)
+        elif is_weak_int(t):
+            scalar_types_found.add(int)
 
     # Remove weakly-typed float if there's a strongly-typed float to match
     if float in scalar_types_found and len(scalar_types_found) > 1:
         other_types = scalar_types_found - {float}
         if any(is_strong_float(t) for t in other_types):
             scalar_types_found.discard(float)
+
+    # Remove weakly-typed int if there's a strongly-typed int or float to match
+    if int in scalar_types_found and len(scalar_types_found) > 1:
+        other_types = scalar_types_found - {int}
+        if any(is_strong_int(t) for t in other_types):
+            scalar_types_found.discard(int)
+        elif any(is_strong_float(t) for t in other_types):
+            # Int-to-float promotion: discard weak int if strong float is present
+            scalar_types_found.discard(int)
 
     if len(scalar_types_found) > 1:
         raise RuntimeError(
