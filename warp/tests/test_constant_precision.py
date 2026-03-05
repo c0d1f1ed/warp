@@ -269,29 +269,28 @@ def test_vec3_int_literals_kernel(result: wp.array(dtype=wp.float32)):
     result[0] = v[0] + v[1] + v[2]
 
 
-# TODO(GH-485): Enable once weak typing of int literals is implemented.
-# @wp.kernel
-# def test_float64_arithmetic_int_literal_kernel(result: wp.array(dtype=wp.float64)):
-#     """Test float64_var * int_literal preserves double precision."""
-#     x = wp.float64(3.141592653589793)
-#     y = x * 2  # int literal should be converted to 2.0 (double precision)
-#     result[0] = y
-#
-#
-# @wp.kernel
-# def test_float32_arithmetic_int_literal_kernel(result: wp.array(dtype=wp.float32)):
-#     """Test float32_var * int_literal uses single precision."""
-#     x = wp.float32(3.141592653589793)
-#     y = x * 2  # int literal should be converted to 2.0f (single precision)
-#     result[0] = y
-#
-#
-# @wp.kernel
-# def test_int_literal_arithmetic_float64_kernel(result: wp.array(dtype=wp.float64)):
-#     """Test int_literal * float64_var preserves double precision (commutative)."""
-#     x = wp.float64(3.141592653589793)
-#     y = 2 * x  # int literal should be converted to 2.0 (double precision)
-#     result[0] = y
+@wp.kernel
+def test_float64_arithmetic_int_literal_kernel(result: wp.array(dtype=wp.float64)):
+    """Test float64_var * int_literal preserves double precision."""
+    x = wp.float64(3.141592653589793)
+    y = x * 2  # int literal should adapt to float64
+    result[0] = y
+
+
+@wp.kernel
+def test_float32_arithmetic_int_literal_kernel(result: wp.array(dtype=wp.float32)):
+    """Test float32_var * int_literal uses single precision."""
+    x = wp.float32(3.141592653589793)
+    y = x * 2  # int literal should adapt to float32
+    result[0] = y
+
+
+@wp.kernel
+def test_int_literal_arithmetic_float64_kernel(result: wp.array(dtype=wp.float64)):
+    """Test int_literal * float64_var preserves double precision (commutative)."""
+    x = wp.float64(3.141592653589793)
+    y = 2 * x  # int literal should adapt to float64
+    result[0] = y
 
 
 @wp.kernel
@@ -403,12 +402,11 @@ def test_literal_literal_complex_expression_kernel(result: wp.array(dtype=wp.flo
     result[0] = a
 
 
-# TODO(GH-485): Enable once weak typing of int literals is implemented.
-# @wp.kernel
-# def test_literal_literal_mixed_int_float_kernel(result: wp.array(dtype=wp.float64)):
-#     """Test that int literal * float literal uses double precision."""
-#     a = 2 * 3.141592653589793
-#     result[0] = a
+@wp.kernel
+def test_literal_literal_mixed_int_float_kernel(result: wp.array(dtype=wp.float64)):
+    """Test that int literal * float literal uses double precision."""
+    a = 2 * 3.141592653589793
+    result[0] = a
 
 
 @wp.kernel
@@ -825,27 +823,26 @@ def test_vec3_int_literals(test, device):
     test.assertEqual(val, 6.0)
 
 
-# TODO(GH-485): Enable once weak typing of int literals is implemented.
-# def test_float64_arithmetic_int_literal(test, device):
-#     result = wp.zeros(1, dtype=wp.float64, device=device)
-#     wp.launch(test_float64_arithmetic_int_literal_kernel, dim=1, inputs=[result], device=device)
-#     val = float(result.numpy()[0])
-#     test.assertEqual(val, 6.283185307179586)
-#
-#
-# def test_float32_arithmetic_int_literal(test, device):
-#     result = wp.zeros(1, dtype=wp.float32, device=device)
-#     wp.launch(test_float32_arithmetic_int_literal_kernel, dim=1, inputs=[result], device=device)
-#     val = float(result.numpy()[0])
-#     expected = float(np.float32(3.141592653589793) * np.float32(2.0))
-#     test.assertEqual(val, expected)
-#
-#
-# def test_int_literal_arithmetic_float64(test, device):
-#     result = wp.zeros(1, dtype=wp.float64, device=device)
-#     wp.launch(test_int_literal_arithmetic_float64_kernel, dim=1, inputs=[result], device=device)
-#     val = float(result.numpy()[0])
-#     test.assertEqual(val, 6.283185307179586)
+def test_float64_arithmetic_int_literal(test, device):
+    result = wp.zeros(1, dtype=wp.float64, device=device)
+    wp.launch(test_float64_arithmetic_int_literal_kernel, dim=1, inputs=[result], device=device)
+    val = float(result.numpy()[0])
+    test.assertEqual(val, 6.283185307179586)
+
+
+def test_float32_arithmetic_int_literal(test, device):
+    result = wp.zeros(1, dtype=wp.float32, device=device)
+    wp.launch(test_float32_arithmetic_int_literal_kernel, dim=1, inputs=[result], device=device)
+    val = float(result.numpy()[0])
+    expected = float(np.float32(3.141592653589793) * np.float32(2.0))
+    test.assertEqual(val, expected)
+
+
+def test_int_literal_arithmetic_float64(test, device):
+    result = wp.zeros(1, dtype=wp.float64, device=device)
+    wp.launch(test_int_literal_arithmetic_float64_kernel, dim=1, inputs=[result], device=device)
+    val = float(result.numpy()[0])
+    test.assertEqual(val, 6.283185307179586)
 
 
 def test_float16_constructor(test, device):
@@ -965,13 +962,12 @@ def test_literal_literal_complex_expression(test, device):
     test.assertAlmostEqual(result.numpy()[0], expected, places=14)
 
 
-# TODO(GH-485): Enable once weak typing of int literals is implemented.
-# def test_literal_literal_mixed_int_float(test, device):
-#     result = wp.zeros(1, dtype=wp.float64, device=device)
-#     wp.launch(test_literal_literal_mixed_int_float_kernel, dim=1, inputs=[result], device=device)
-#
-#     expected = 2 * 3.141592653589793
-#     test.assertAlmostEqual(result.numpy()[0], expected, places=15)
+def test_literal_literal_mixed_int_float(test, device):
+    result = wp.zeros(1, dtype=wp.float64, device=device)
+    wp.launch(test_literal_literal_mixed_int_float_kernel, dim=1, inputs=[result], device=device)
+
+    expected = 2 * 3.141592653589793
+    test.assertAlmostEqual(result.numpy()[0], expected, places=15)
 
 
 def test_constant_fold_div_by_zero(test, device):
@@ -1290,9 +1286,8 @@ class TestConstantPrecision(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, r"Input types must be the same"):
             wp.launch(kernel, dim=1, device="cpu")
 
-    @unittest.expectedFailure
     def test_weak_int_float_interaction(self):
-        """int + float promotion — not yet implemented."""
+        """int + float promotion works via weak typing."""
 
         @wp.kernel
         def kernel(result: wp.array(dtype=wp.float64)):
@@ -1402,16 +1397,15 @@ add_function_test(TestConstantPrecision, "test_transformd_precision", test_trans
 add_function_test(TestConstantPrecision, "test_scalar_int_literal", test_scalar_int_literal, devices=devices)
 add_function_test(TestConstantPrecision, "test_vec3d_int_literals", test_vec3d_int_literals, devices=devices)
 add_function_test(TestConstantPrecision, "test_vec3_int_literals", test_vec3_int_literals, devices=devices)
-# TODO(GH-485): Enable once weak typing of int literals is implemented.
-# add_function_test(
-#     TestConstantPrecision, "test_float64_arithmetic_int_literal", test_float64_arithmetic_int_literal, devices=devices
-# )
-# add_function_test(
-#     TestConstantPrecision, "test_float32_arithmetic_int_literal", test_float32_arithmetic_int_literal, devices=devices
-# )
-# add_function_test(
-#     TestConstantPrecision, "test_int_literal_arithmetic_float64", test_int_literal_arithmetic_float64, devices=devices
-# )
+add_function_test(
+    TestConstantPrecision, "test_float64_arithmetic_int_literal", test_float64_arithmetic_int_literal, devices=devices
+)
+add_function_test(
+    TestConstantPrecision, "test_float32_arithmetic_int_literal", test_float32_arithmetic_int_literal, devices=devices
+)
+add_function_test(
+    TestConstantPrecision, "test_int_literal_arithmetic_float64", test_int_literal_arithmetic_float64, devices=devices
+)
 add_function_test(TestConstantPrecision, "test_float16_constructor", test_float16_constructor, devices=devices)
 add_function_test(TestConstantPrecision, "test_float16_int_literal", test_float16_int_literal, devices=devices)
 add_function_test(
@@ -1454,10 +1448,9 @@ add_function_test(
     test_literal_literal_complex_expression,
     devices=devices,
 )
-# TODO(GH-485): Enable once weak typing of int literals is implemented.
-# add_function_test(
-#     TestConstantPrecision, "test_literal_literal_mixed_int_float", test_literal_literal_mixed_int_float, devices=devices
-# )
+add_function_test(
+    TestConstantPrecision, "test_literal_literal_mixed_int_float", test_literal_literal_mixed_int_float, devices=devices
+)
 add_function_test(
     TestConstantPrecision, "test_constant_fold_div_by_zero", test_constant_fold_div_by_zero, devices=devices
 )

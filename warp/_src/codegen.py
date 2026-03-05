@@ -1798,12 +1798,10 @@ class Adjoint:
                     val_type = get_arg_type(val)
                     if is_weak_float(val_type) and float_target is not None:
                         return adj._cast_to(val, float_target)
-                    # Note: weak int is NOT cast to int_target here. Unlike float
-                    # precision (where all floats should match), int width varies
-                    # by role (index vs value vs handle). The _cast_weak_int_default
-                    # pass handles remaining weak ints by casting to int32, and
-                    # specific handlers (constructors, compound types, stores)
-                    # handle adaptation to other int types.
+                    # Weak int is NOT cast here. Int width varies by role (index
+                    # vs value vs handle); _cast_weak_int_default handles remaining
+                    # weak ints.  Int-to-float promotion for binary ops is handled
+                    # by the sametypes handler in add_builtin_call.
                 if isinstance(val, tuple):
                     return tuple(_cast_val(x) if isinstance(x, Var) else x for x in val)
                 return val
@@ -2128,6 +2126,24 @@ class Adjoint:
                     args = list(args)
                     args[scalar_arg_index] = casted
                     args = tuple(args)
+
+            # Scalar-scalar int-to-float promotion: cast weak int to match float
+            if compound_scalar_type is None:
+                for check_idx, other_idx in ((0, 1), (1, 0)):
+                    check_type = get_arg_type(args[check_idx])
+                    other_type = get_arg_type(args[other_idx])
+                    if is_weak_int(check_type) and (is_strong_float(other_type) or is_weak_float(other_type)):
+                        # Promote weak int to match the float type. For weak float,
+                        # convert to float constant (stays weak/double precision).
+                        if is_weak_float(other_type) and getattr(args[check_idx], "constant", None) is not None:
+                            casted = adj.add_constant(float(args[check_idx].constant))
+                        else:
+                            target = other_type if is_strong_float(other_type) else float32
+                            casted = adj._cast_to(args[check_idx], target)
+                        args = list(args)
+                        args[check_idx] = casted
+                        args = tuple(args)
+                        break
 
         # Store/array_store: cast weakly-typed value to match target type
         if func_name == "store" and len(args) == 2:
