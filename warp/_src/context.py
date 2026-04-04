@@ -10,7 +10,9 @@ import enum
 import functools
 import hashlib
 import importlib
+import importlib.machinery
 import importlib.metadata
+import importlib.util
 import inspect
 import io
 import itertools
@@ -4071,6 +4073,17 @@ class Runtime:
             llvm_lib = os.path.join(bin_path, "warp-clang.so")
 
         self.core = self.load_dll(warp_lib)
+
+        # Load the METH_FASTCALL module from the same native library.
+        # The OS deduplicates the load (same handle, shared globals).
+        try:
+            loader = importlib.machinery.ExtensionFileLoader("_warp_fastcall", warp_lib)
+            spec = importlib.util.spec_from_file_location("_warp_fastcall", warp_lib, loader=loader)
+            fastcall = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(fastcall)
+            self.fastcall = fastcall
+        except Exception:
+            self.fastcall = None
 
         if os.path.exists(llvm_lib):
             self.llvm = self.load_dll(llvm_lib)
