@@ -595,11 +595,11 @@ def constant(x):
     return x
 
 
-def float_to_half_bits(value):
+def float_to_half_bits(value: float) -> int:
     return warp._src.context.runtime.fastcall.float_to_half_bits(value)
 
 
-def half_bits_to_float(value):
+def half_bits_to_float(value: int) -> float:
     return warp._src.context.runtime.fastcall.half_bits_to_float(value)
 
 
