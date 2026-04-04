@@ -796,25 +796,37 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
                 print(f"build took {elapsed:.2f} ms ({args.jobs:d} workers)")
 
         if sys.platform == "darwin":
-            opt_no_undefined = "-Wl,-undefined,error"
+            # Python symbols from fastcall.cpp are resolved at runtime by the interpreter.
+            # -undefined dynamic_lookup is the standard macOS convention (used by CPython, pybind11).
+            opt_no_undefined = "-Wl,-undefined,dynamic_lookup"
             opt_exclude_libs = ""
             opt_static_runtime = ""
         else:
-            opt_no_undefined = "-Wl,--no-undefined"
+            # --warn-unresolved-symbols downgrades unresolved-symbol errors to warnings so the
+            # link succeeds. Python C API symbols from fastcall.cpp are left unresolved at link
+            # time and resolved at runtime by the interpreter (linked with -export-dynamic).
+            opt_no_undefined = "-Wl,--no-undefined -Wl,--warn-unresolved-symbols"
             opt_exclude_libs = "-Wl,--exclude-libs,ALL"
             opt_static_runtime = f"-static-libstdc++ -static-libgcc -Wl,--version-script={native_dir}/warp.map"
-
-        # Python stable ABI library for fastcall.cpp
-        python_libdir = sysconfig.get_config_var("LIBDIR")
-        if python_libdir:
-            ld_inputs.append(f"-L{python_libdir} -lpython3")
-        else:
-            ld_inputs.append("-lpython3")
 
         with ScopedTimer("link", active=args.verbose):
             origin = "@loader_path" if (sys.platform == "darwin") else "$ORIGIN"
             link_cmd = f"{cpp_compiler} {version} -shared -Wl,-rpath,'{origin}' {opt_static_runtime} {opt_no_undefined} {opt_exclude_libs} -o '{dll_path}' {' '.join(ld_inputs + libs)}"
-            run_cmd(link_cmd)
+            output = run_cmd(link_cmd)
+
+            # On Linux, --warn-unresolved-symbols allows the link to succeed while printing
+            # warnings for unresolved symbols. Python C API symbols (Py*) from fastcall.cpp
+            # are expected; any others indicate a real build problem.
+            if output and sys.platform != "darwin":
+                unexpected = []
+                for line in output.decode().splitlines():
+                    if "undefined reference to" not in line and "undefined symbol" not in line:
+                        continue
+                    # Extract the symbol name and check if it's a Python C API symbol
+                    if not re.search(r"`?Py\w+", line):
+                        unexpected.append(line.strip())
+                if unexpected:
+                    raise RuntimeError("Unexpected unresolved symbols during linking:\n" + "\n".join(unexpected))
 
             # Strip symbols to reduce the binary size
             if mode == "release":
