@@ -4082,8 +4082,8 @@ class Runtime:
             fastcall = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(fastcall)
             self.fastcall = fastcall
-        except Exception:
-            self.fastcall = None
+        except Exception as e:
+            raise RuntimeError(f"Failed to load _warp_fastcall module from {warp_lib}: {e}") from e
 
         if os.path.exists(llvm_lib):
             self.llvm = self.load_dll(llvm_lib)
