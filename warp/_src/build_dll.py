@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import sys
+import sysconfig
 import time
 
 from warp._src.utils import ScopedTimer
@@ -625,6 +626,8 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
                 extra_flags = ""
                 if "clang/clang.cpp" in cpp_path.replace("\\", "/"):
                     extra_flags = " /wd4624"  # suppress C4624: destructor was implicitly defined as deleted
+                if "fastcall.cpp" in cpp_path:
+                    extra_flags += f' /I"{sysconfig.get_path("include")}" /DPy_LIMITED_API=0x030a0000'  # Python 3.10
                 cpp_cmd = f'"{args.host_compiler}" {cpp_flags}{extra_flags} -c "{cpp_path}" /Fo"{cpp_out}"'
                 cpp_cmds.append(cpp_cmd)
 
@@ -677,6 +680,10 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
                 elapsed = (time.perf_counter_ns() - wall_clock) / 1000000.0
                 print(f"build took {elapsed:.2f} ms ({args.jobs:d} workers)")
 
+        # Python stable ABI library for fastcall.cpp
+        python_libs_dir = os.path.join(sys.base_prefix, "libs")
+        linkopts.append(f'python3.lib /LIBPATH:"{python_libs_dir}"')
+
         with ScopedTimer("link", active=args.verbose):
             link_cmd = f'"{host_linker}" {" ".join(linkopts + libs)} /out:"{dll_path}"'
             run_cmd(link_cmd)
@@ -726,7 +733,10 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
             for cpp_path in cpp_paths:
                 cpp_out = cpp_path + _obj_tag + ".o"
                 ld_inputs.append(quote(cpp_out))
-                cpp_cmd = f'{cpp_compiler} {cpp_flags} -c "{cpp_path}" -o "{cpp_out}"'
+                extra_flags = ""
+                if "fastcall.cpp" in cpp_path:
+                    extra_flags = f' -I"{sysconfig.get_path("include")}" -DPy_LIMITED_API=0x030a0000'  # Python 3.10
+                cpp_cmd = f'{cpp_compiler} {cpp_flags}{extra_flags} -c "{cpp_path}" -o "{cpp_out}"'
                 cpp_cmds.append(cpp_cmd)
 
             if args.jobs <= 1:
@@ -793,6 +803,13 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
             opt_no_undefined = "-Wl,--no-undefined"
             opt_exclude_libs = "-Wl,--exclude-libs,ALL"
             opt_static_runtime = f"-static-libstdc++ -static-libgcc -Wl,--version-script={native_dir}/warp.map"
+
+        # Python stable ABI library for fastcall.cpp
+        python_libdir = sysconfig.get_config_var("LIBDIR")
+        if python_libdir:
+            ld_inputs.append(f"-L{python_libdir} -lpython3")
+        else:
+            ld_inputs.append("-lpython3")
 
         with ScopedTimer("link", active=args.verbose):
             origin = "@loader_path" if (sys.platform == "darwin") else "$ORIGIN"
