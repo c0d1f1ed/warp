@@ -29,8 +29,8 @@ static PyObject* fastcall_half_bits_to_float(PyObject* self, PyObject* const* ar
         return nullptr;
     }
 
-    long bits = PyLong_AsLong(args[0]);
-    if (bits == -1 && PyErr_Occurred())
+    unsigned long bits = PyLong_AsUnsignedLongMask(args[0]);
+    if (PyErr_Occurred())
         return nullptr;
 
     float value = wp_half_bits_to_float(static_cast<uint16_t>(bits));
