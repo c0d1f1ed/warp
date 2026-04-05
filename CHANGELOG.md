@@ -57,6 +57,8 @@
 - Allow typed composite constructors (e.g. `wp.vec3d()`, `wp.mat22h()`, `wp.quatd()`) to accept
   scalar literals directly, preserving precision without explicit casts
   ([GH-1297](https://github.com/NVIDIA/warp/issues/1297)).
+- Reduce Python-side dispatch overhead for half-float conversion using `METH_FASTCALL`
+  ([GH-1339](https://github.com/NVIDIA/warp/issues/1339)).
 - Allow `wp.Volume.load_from_numpy()` and `wp.Volume.allocate()` to accept a 3-element sequence for
   `voxel_size`, enabling volumes with anisotropic voxel spacing
   ([GH-1193](https://github.com/NVIDIA/warp/issues/1193)).
