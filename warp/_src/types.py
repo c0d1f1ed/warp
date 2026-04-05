@@ -596,11 +596,11 @@ def constant(x):
 
 
 def float_to_half_bits(value: float) -> int:
-    return warp._src.context.runtime.fastcall.float_to_half_bits(value)
+    return warp._src.context.runtime.core.wp_float_to_half_bits(value)
 
 
 def half_bits_to_float(value: int) -> float:
-    return warp._src.context.runtime.fastcall.half_bits_to_float(value)
+    return warp._src.context.runtime.core.wp_half_bits_to_float(value)
 
 
 def safe_len(obj):

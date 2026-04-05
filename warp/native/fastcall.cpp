@@ -37,10 +37,14 @@ static PyObject* fastcall_half_bits_to_float(PyObject* self, PyObject* const* ar
     return PyFloat_FromDouble(static_cast<double>(value));
 }
 
+// Method names use the wp_ prefix to match the ctypes bindings on runtime.core.
+// At init time, these override the ctypes versions so all call sites use the
+// faster path transparently. If the module fails to load, the ctypes versions
+// remain in place as a fallback.
 static PyMethodDef fastcall_methods[] = {
-    { "float_to_half_bits", reinterpret_cast<PyCFunction>(fastcall_float_to_half_bits), METH_FASTCALL,
+    { "wp_float_to_half_bits", reinterpret_cast<PyCFunction>(fastcall_float_to_half_bits), METH_FASTCALL,
       "Convert a float to float16 bit pattern" },
-    { "half_bits_to_float", reinterpret_cast<PyCFunction>(fastcall_half_bits_to_float), METH_FASTCALL,
+    { "wp_half_bits_to_float", reinterpret_cast<PyCFunction>(fastcall_half_bits_to_float), METH_FASTCALL,
       "Convert a float16 bit pattern to float" },
     { nullptr, nullptr, 0, nullptr },
 };

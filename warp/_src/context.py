@@ -4074,17 +4074,6 @@ class Runtime:
 
         self.core = self.load_dll(warp_lib)
 
-        # Load the METH_FASTCALL module from the same native library.
-        # The OS deduplicates the load (same handle, shared globals).
-        try:
-            loader = importlib.machinery.ExtensionFileLoader("_warp_fastcall", warp_lib)
-            spec = importlib.util.spec_from_file_location("_warp_fastcall", warp_lib, loader=loader)
-            fastcall = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(fastcall)
-            self.fastcall = fastcall
-        except Exception as e:
-            raise RuntimeError(f"Failed to load _warp_fastcall module from {warp_lib}: {e}") from e
-
         if os.path.exists(llvm_lib):
             self.llvm = self.load_dll(llvm_lib)
             # setup c-types for warp-clang.dll
@@ -5200,6 +5189,27 @@ class Runtime:
             if hasattr(self.core, name):
                 getattr(self.core, name).argtypes = []
                 getattr(self.core, name).restype = restype
+
+        # Load the METH_FASTCALL module from the same native library and override
+        # the ctypes bindings on self.core with faster versions. If the module fails
+        # to load, the ctypes versions remain in place as a fallback. This must happen
+        # after the ctypes argtypes/restype setup above, since the override replaces
+        # ctypes function objects with plain Python callables that lack those attributes.
+        self.fastcall = None
+        try:
+            loader = importlib.machinery.ExtensionFileLoader("_warp_fastcall", warp_lib)
+            spec = importlib.util.spec_from_file_location("_warp_fastcall", warp_lib, loader=loader)
+            fastcall = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(fastcall)
+            self.fastcall = fastcall
+            self.core.ctypes = types.SimpleNamespace()
+            for name in dir(fastcall):
+                if name.startswith("wp_"):
+                    # Save the original ctypes function before overriding, for testing.
+                    setattr(self.core.ctypes, name, getattr(self.core, name))
+                    setattr(self.core, name, getattr(fastcall, name))
+        except Exception as e:
+            warp._src.utils.warn(f"Failed to load _warp_fastcall module: {e}. Falling back to ctypes.")
 
         # Initialize with version verification
         error = self.core.wp_init(warp.config.version.encode("utf-8"))
