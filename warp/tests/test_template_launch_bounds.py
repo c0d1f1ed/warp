@@ -23,7 +23,7 @@ import numpy as np
 import warp as wp
 
 # Private helpers live under warp._src; tests import them directly.
-from warp._src.context import _prepare_launch_dim
+from warp._src.context import _build_rank_error, _prepare_launch_dim, _tid_unpack
 from warp.tests.unittest_utils import *
 
 BLOCK_DIM = 64
@@ -96,35 +96,51 @@ def test_regular_4d(test, device):
 
 
 # ============================================================================
-# Launch-dim rank validation: mismatch raises ValueError
+# Launch-dim rank validation: mismatch raises ValueError with migration options
 # ============================================================================
 
 
 def test_launch_dim_over_rank_kernel_dim_1_error(test, device):
-    """dim rank > kernel_dim=1 raises ValueError."""
+    """dim rank > kernel_dim=1: error lists all 4 intent options."""
     N = 3
     out = wp.zeros(N * N, dtype=int, device=device)
     with test.assertRaises(ValueError) as cm:
         wp.launch(regular_1d_kernel, dim=(N, N), inputs=[out], device=device)
-    test.assertIn("kernel_dim=1", str(cm.exception))
+    msg = str(cm.exception)
+    test.assertIn("kernel_dim=1", msg)
+    test.assertIn("flat linear index over 9 threads: launch with dim=9", msg)
+    test.assertIn("first-dim index (0..2, no repetition): launch with dim=3", msg)
+    test.assertIn("first-dim index with repetition: unpack as `i, _ = wp.tid()`", msg)
+    test.assertIn("per-dim indexing: unpack as `i, j = wp.tid()`", msg)
 
 
 def test_launch_dim_over_rank_kernel_dim_2_error(test, device):
-    """dim rank > kernel_dim=2 raises ValueError."""
+    """dim rank > kernel_dim=2: launch-only options omitted (they'd require kernel edit too)."""
     M, N, K = 2, 3, 4
     out = wp.zeros((M, N * K), dtype=int, device=device)
     with test.assertRaises(ValueError) as cm:
         wp.launch(regular_2d_kernel, dim=(M, N, K), inputs=[out, M, N * K], device=device)
-    test.assertIn("kernel_dim=2", str(cm.exception))
+    msg = str(cm.exception)
+    test.assertIn("kernel_dim=2", msg)
+    # Guard: misleading launch-only fixes must NOT appear when kernel_dim >= 2.
+    test.assertNotIn("flat linear", msg)
+    test.assertNotIn(f"launch with dim={M * N * K}", msg)
+    test.assertNotIn("no repetition", msg)
+    # Kernel-side fixes still appear.
+    test.assertIn("first-dim index with repetition: unpack as `i, _, _ = wp.tid()`", msg)
+    test.assertIn("per-dim indexing: unpack as `i, j, k = wp.tid()`", msg)
 
 
 def test_launch_dim_under_rank_error(test, device):
-    """dim rank < kernel_dim raises ValueError."""
+    """dim rank < kernel_dim: error lists the two fix options."""
     N = 10
     out = wp.zeros((N, 1), dtype=int, device=device)
     with test.assertRaises(ValueError) as cm:
         wp.launch(regular_2d_kernel, dim=N, inputs=[out, N, 1], device=device)
-    test.assertIn("kernel_dim=2", str(cm.exception))
+    msg = str(cm.exception)
+    test.assertIn("kernel_dim=2", msg)
+    test.assertIn("keep 2-D kernel, launch with matching rank: dim=(10, 1)", msg)
+    test.assertIn("change kernel to unpack 1 variable: `i = wp.tid()`", msg)
 
 
 # ============================================================================
@@ -243,7 +259,7 @@ def test_manual_tiled(test, device):
 
 
 def test_tiled_dim_mismatch_error(test, device):
-    """launch_tiled should raise ValueError when kernel_dim is incompatible with dim."""
+    """launch_tiled should raise ValueError with migration hint when kernel_dim is incompatible with dim."""
 
     @wp.kernel
     def _tiled_4d_kernel(out: wp.array(dtype=float)):
@@ -258,7 +274,10 @@ def test_tiled_dim_mismatch_error(test, device):
             block_dim=BLOCK_DIM,
             device=device,
         )
-    test.assertIn("kernel_dim=4", str(cm.exception))
+    msg = str(cm.exception)
+    test.assertIn("kernel_dim=4", msg)
+    # tiled hint should appear because this is a tiled launch
+    test.assertIn("For launch_tiled, dim may also match kernel_dim - 1", msg)
 
 
 # ============================================================================
@@ -290,7 +309,9 @@ def test_set_dim_rank_mismatch_error(test, device):
 
     with test.assertRaises(ValueError) as cm:
         launch.set_dim([8, 8])
-    test.assertIn("kernel_dim=1", str(cm.exception))
+    msg = str(cm.exception)
+    test.assertIn("kernel_dim=1", msg)
+    test.assertIn("flat linear index over 64 threads", msg)
 
 
 def test_set_dim_preserves_tiled_flag(test, device):
@@ -363,6 +384,81 @@ def _stub_kernel(key: str = "foo", *, kernel_dim: int = 1, max_tid_dim: int | No
         max_tid_dim = kernel_dim
     adj = SimpleNamespace(kernel_dim=kernel_dim, max_tid_dimensionality=max_tid_dim)
     return SimpleNamespace(key=key, adj=adj)
+
+
+class TestTidUnpack(unittest.TestCase):
+    def test_scalar(self):
+        self.assertEqual(_tid_unpack(1), "i = wp.tid()")
+
+    def test_two(self):
+        self.assertEqual(_tid_unpack(2), "i, j = wp.tid()")
+
+    def test_three(self):
+        self.assertEqual(_tid_unpack(3), "i, j, k = wp.tid()")
+
+    def test_four(self):
+        self.assertEqual(_tid_unpack(4), "i, j, k, l = wp.tid()")
+
+    def test_beyond_supported(self):
+        # degrades gracefully when n > len(_TID_NAMES)
+        self.assertEqual(_tid_unpack(5), "... = wp.tid()  # 5 variables")
+
+    def test_zero(self):
+        # guards against pathological input; real callers always pass n >= 1
+        self.assertEqual(_tid_unpack(0), "... = wp.tid()  # 0 variables")
+
+
+class TestBuildRankError(unittest.TestCase):
+    def test_over_rank_kernel_dim_1_lists_all_four_options(self):
+        msg = _build_rank_error((3, 3), kernel_dim=1, kernel=_stub_kernel("foo"), tiled=False)
+        self.assertIn("Launch dim (3, 3) has rank 2", msg)
+        self.assertIn("kernel 'foo'", msg)
+        self.assertIn("kernel_dim=1", msg)
+        self.assertIn("flat linear index over 9 threads: launch with dim=9", msg)
+        self.assertIn("first-dim index (0..2, no repetition): launch with dim=3", msg)
+        self.assertIn("first-dim index with repetition: unpack as `i, _ = wp.tid()`", msg)
+        self.assertIn("per-dim indexing: unpack as `i, j = wp.tid()`", msg)
+
+    def test_over_rank_kernel_dim_2_omits_launch_only_options(self):
+        # With kernel_dim >= 2 the launch-only options would require a second
+        # kernel edit to land — don't offer them.
+        msg = _build_rank_error((2, 3, 4), kernel_dim=2, kernel=_stub_kernel("baz"), tiled=False)
+        self.assertIn("kernel_dim=2", msg)
+        self.assertNotIn("flat linear", msg)
+        self.assertNotIn("launch with dim=24", msg)
+        self.assertNotIn("no repetition", msg)
+        self.assertIn("first-dim index with repetition: unpack as `i, _, _ = wp.tid()`", msg)
+        self.assertIn("per-dim indexing: unpack as `i, j, k = wp.tid()`", msg)
+
+    def test_under_rank_lists_two_options(self):
+        msg = _build_rank_error((10,), kernel_dim=2, kernel=_stub_kernel("bar"), tiled=False)
+        self.assertIn("Launch dim (10,) has rank 1", msg)
+        self.assertIn("kernel_dim=2", msg)
+        self.assertIn("keep 2-D kernel, launch with matching rank: dim=(10, 1)", msg)
+        self.assertIn("change kernel to unpack 1 variable: `i = wp.tid()`", msg)
+
+    def test_under_rank_tiled_lists_kernel_dim_minus_one_option(self):
+        # For tiled launches, dim rank may also match kernel_dim - 1; offer a
+        # concrete option alongside the rank-matching one.
+        msg = _build_rank_error((2, 3), kernel_dim=4, kernel=_stub_kernel("baz"), tiled=True)
+        self.assertIn("kernel_dim=4", msg)
+        # rank-kernel_dim option
+        self.assertIn("keep 4-D kernel, launch with matching rank: dim=(2, 3, 1, 1)", msg)
+        # rank-(kernel_dim - 1) option — the new one
+        self.assertIn("keep 4-D kernel with implicit block_dim axis, launch with dim=(2, 3, 1)", msg)
+
+    def test_under_rank_non_tiled_omits_kernel_dim_minus_one_option(self):
+        # Non-tiled launches have no kernel_dim - 1 escape hatch.
+        msg = _build_rank_error((2, 3), kernel_dim=4, kernel=_stub_kernel("baz"), tiled=False)
+        self.assertNotIn("implicit block_dim axis", msg)
+
+    def test_tiled_flag_appends_hint(self):
+        msg = _build_rank_error((3, 3), kernel_dim=1, kernel=_stub_kernel("foo"), tiled=True)
+        self.assertIn("For launch_tiled, dim may also match kernel_dim - 1", msg)
+
+    def test_non_tiled_omits_hint(self):
+        msg = _build_rank_error((3, 3), kernel_dim=1, kernel=_stub_kernel("foo"), tiled=False)
+        self.assertNotIn("launch_tiled", msg)
 
 
 class TestPrepareLaunchDim(unittest.TestCase):

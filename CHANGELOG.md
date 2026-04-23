@@ -112,7 +112,7 @@
   pressure for lower-dimensional launches.
   **Breaking:** `wp.launch()`, `Launch.set_dim()`, `wp.launch_tiled()`, and the experimental JAX FFI paths
   now raise `ValueError` when the rank of `dim` does not match the kernel's `wp.tid()` unpack arity
-  (e.g. `i = wp.tid()` launched with `dim=(3, 3)`).
+  (e.g. `i = wp.tid()` launched with `dim=(3, 3)`); the error message lists concrete migration options.
   To recover the previous first-dimension indexing, unpack all dimensions and discard extras
   (e.g. `i, _ = wp.tid()`). Kernels that do not call `wp.tid()` still accept any `dim`, flattened to
   total thread count. `launch_tiled`'s rank-mismatch error changed from `RuntimeError` to `ValueError`

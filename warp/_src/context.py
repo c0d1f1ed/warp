@@ -8124,6 +8124,85 @@ def _canonicalize_dim(dim: int | Sequence[int]) -> tuple[int, ...]:
     return tuple(dim)
 
 
+_TID_NAMES = ("i", "j", "k", "l")  # canonical Warp tid-unpack variable names
+
+
+def _tid_unpack(n: int) -> str:
+    """Render the canonical ``wp.tid()`` unpack syntax for an n-dimensional kernel.
+
+    Returns a string like ``"i, j = wp.tid()"``. Falls back to a generic
+    placeholder for ``n`` outside ``[1, len(_TID_NAMES)]`` — used when the user's
+    requested arity exceeds the standard tid naming (e.g. over-rank launches
+    with ``ndim == 5`` surfaced through :func:`_build_rank_error`).
+    """
+    if n <= 0 or n > len(_TID_NAMES):
+        return f"... = wp.tid()  # {n} variables"
+    if n == 1:
+        return "i = wp.tid()"
+    return f"{', '.join(_TID_NAMES[:n])} = wp.tid()"
+
+
+def _build_rank_error(
+    dim: tuple[int, ...],
+    kernel_dim: int,
+    kernel,
+    tiled: bool,
+) -> str:
+    """Compose the ValueError message for a launch-dim rank mismatch.
+
+    Lists concrete migration options with pre-computed values for the specific
+    call that triggered the error so users don't have to do a doc round-trip.
+    """
+    ndim = len(dim)
+    flat = math.prod(dim) if dim else 0
+    key = kernel.key
+
+    header = (
+        f"Launch dim {dim} has rank {ndim} but kernel '{key}' unpacks "
+        f"wp.tid() into {kernel_dim} variable{'s' if kernel_dim != 1 else ''} "
+        f"(kernel_dim={kernel_dim})."
+    )
+
+    if ndim > kernel_dim:
+        options = []
+        # Launch-side fixes only make sense when the kernel is already scalar.
+        # For kernel_dim >= 2, these would require a second (kernel-side) edit
+        # to actually succeed, so presenting them as single-step fixes would
+        # mislead the user.
+        if kernel_dim == 1:
+            options.append(f"  - flat linear index over {flat} threads: launch with dim={flat}")
+            options.append(f"  - first-dim index (0..{dim[0] - 1}, no repetition): launch with dim={dim[0]}")
+        # Kernel-side fixes are always applicable.
+        repeat_unpack = "i, " + ", ".join(["_"] * (ndim - 1)) + " = wp.tid()"
+        options.append(f"  - first-dim index with repetition: unpack as `{repeat_unpack}`")
+        options.append(f"  - per-dim indexing: unpack as `{_tid_unpack(ndim)}`")
+    else:
+        # ndim < kernel_dim: under-rank
+        padded = dim + (1,) * (kernel_dim - ndim)
+        options = [f"  - keep {kernel_dim}-D kernel, launch with matching rank: dim={padded}"]
+        # Tiled launches also accept len(dim) == kernel_dim - 1 (block_dim axis is implicit);
+        # offer that as a concrete alternative when it differs from the rank-matching option.
+        if tiled and kernel_dim >= 2:
+            padded_tiled = dim + (1,) * (kernel_dim - 1 - ndim)
+            options.append(
+                f"  - keep {kernel_dim}-D kernel with implicit block_dim axis, launch with dim={padded_tiled}"
+            )
+        # Kernel-side unpack hint only makes sense for non-empty dim; dim=() would
+        # render as `... = wp.tid()  # 0 variables`, which isn't actionable.
+        if ndim >= 1:
+            options.append(
+                f"  - change kernel to unpack {ndim} variable{'s' if ndim != 1 else ''}: `{_tid_unpack(ndim)}`"
+            )
+
+    tiled_note = (
+        "\n(For launch_tiled, dim may also match kernel_dim - 1; the block_dim axis is supplied implicitly.)"
+        if tiled
+        else ""
+    )
+
+    return "\n".join([header, "Pick the intended behavior:", *options]) + tiled_note
+
+
 def _prepare_launch_dim(
     dim,  # int | Sequence[int]
     kernel,
@@ -8152,7 +8231,7 @@ def _prepare_launch_dim(
 
     Raises:
         ValueError: The rank of ``dim`` does not match the kernel's ``wp.tid()``
-          arity.
+          arity. The message lists the valid migration options.
     """
     dim = _canonicalize_dim(dim)
     if kernel.adj.max_tid_dimensionality == 0:
@@ -8166,10 +8245,7 @@ def _prepare_launch_dim(
         return dim
     if len(dim) == expected:
         return dim
-    raise ValueError(
-        f"Launch dim {dim} (rank {len(dim)}) does not match kernel '{kernel.key}' "
-        f"wp.tid() arity (kernel_dim={expected})."
-    )
+    raise ValueError(_build_rank_error(dim, expected, kernel, tiled))
 
 
 def _construct_tiled_bounds(dim, block_dim, kernel):
