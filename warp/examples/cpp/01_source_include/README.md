@@ -138,8 +138,11 @@ Generates `generated/wp___main__.cu` with:
 #include "generated/wp___main__.cu"
 
 // Setup Warp structures
-wp::launch_bounds_t<1> loss_dim = {{N_SAMPLES}, size_t(N_SAMPLES), false};
-wp::launch_bounds_t<1> update_dim = {{2}, 2, false};
+// launch_bounds_t<N> must match the compiled kernel. Default
+// (wp.config.optimize_tid=False) gives N=4 for every tid kernel;
+// optimize_tid=True makes N match the kernel's wp.tid() arity.
+wp::launch_bounds_t<4> loss_dim = {{N_SAMPLES, 1, 1, 1}, size_t(N_SAMPLES), false};
+wp::launch_bounds_t<4> update_dim = {{2, 1, 1, 1}, 2, false};
 wp::array_t<wp::float32> arr_params(d_params, 2);
 wp::array_t<wp::float32> arr_x(d_x, N_SAMPLES);
 // ... other arrays ...

@@ -1110,35 +1110,49 @@ class Adjoint:
         # for unit testing errors being spit out from kernels.
         adj.skip_build = False
 
-        # Infer kernel_dim from wp.tid() calls in the AST.  This must happen
-        # early (before hashing) because kernel_dim determines the
-        # launch_bounds_t<N> template parameter in the generated C++ and
-        # therefore affects the compiled binary.  The hasher runs before
-        # build(), so kernel_dim must already be correct at this point.
-        adj.kernel_dim = adj._infer_kernel_dim()
+        adj.tid_arity = adj._infer_tid_arity()
 
-    def _infer_kernel_dim(adj) -> int:
-        """Infer kernel_dim from ``wp.tid()`` calls in the already-parsed AST.
+    def _infer_tid_arity(adj) -> int:
+        """Return the maximum ``wp.tid()`` unpack arity across the kernel's AST.
 
-        This is a lightweight scan that runs during ``__init__`` (before hashing
-        and before ``build()``).  It mirrors the tid-tracking logic that was
-        previously inside ``build()`` but only walks assignments looking for
-        ``wp.tid()`` patterns, so it is much cheaper than a full build.
+        Lightweight scan that runs during ``__init__`` (before hashing and
+        before ``build()``). Walks assignments looking for ``wp.tid()`` patterns
+        and returns the largest unpack count — the kernel's intrinsic tid arity,
+        independent of ``warp.config.optimize_tid``. The effective ``kernel_dim``
+        is derived from this via the :attr:`kernel_dim` property.
 
-        Also sets ``max_tid_dimensionality`` (0 when no ``wp.tid()`` calls
-        exist) which is used by ``_construct_tiled_bounds`` to detect
-        kernels that don't call ``wp.tid()`` at all.
+        Returns 0 when the kernel contains no ``wp.tid()`` calls;
+        :func:`_construct_tiled_bounds` uses that to detect dim-agnostic kernels.
         """
-        max_dim = 0
+        max_arity = 0
         for node in ast.walk(adj.tree):
             if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call) and _is_tid_call(node.value):
                 target = node.targets[0]
                 if isinstance(target, ast.Tuple):
-                    max_dim = max(max_dim, len(target.elts))
+                    max_arity = max(max_arity, len(target.elts))
                 else:
-                    max_dim = max(max_dim, 1)
-        adj.max_tid_dimensionality = max_dim
-        return max_dim if max_dim > 0 else 1
+                    max_arity = max(max_arity, 1)
+        return max_arity
+
+    @property
+    def kernel_dim(adj) -> int:
+        """Number of template dimensions for ``launch_bounds_t<N>``.
+
+        Derived from ``tid_arity`` and ``warp.config.optimize_tid``.
+        No-tid kernels always get 1 (dim-agnostic). Tid kernels get the actual
+        unpack arity when ``optimize_tid`` is True, and ``LAUNCH_MAX_DIMS``
+        otherwise (so the launch ``dim`` can be padded with trailing ones).
+
+        Read at codegen time (to emit ``launch_bounds_t<N>``) and at launch time
+        (to validate/pad ``dim``). Since ``optimize_tid`` is part of the module
+        hash, flipping it invalidates the kernel cache so a fresh codegen picks
+        up the new value.
+        """
+        if adj.tid_arity == 0:
+            return 1
+        if not warp.config.optimize_tid:
+            return LAUNCH_MAX_DIMS
+        return adj.tid_arity
 
     # allocate extra space for a function call that requires its
     # own shared memory space, we treat shared memory as a stack

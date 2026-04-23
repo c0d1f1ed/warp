@@ -66,7 +66,7 @@ import warp._src.codegen
 import warp.config
 from warp._src.codegen import WarpCodegenTypeError, synchronized
 from warp._src.texture import Texture1D, Texture2D, Texture3D, texture1d_t, texture2d_t, texture3d_t
-from warp._src.types import Array, LaunchBounds, launch_bounds_t, type_repr
+from warp._src.types import LAUNCH_MAX_DIMS, Array, LaunchBounds, launch_bounds_t, type_repr
 
 _wp_module_name_ = "warp.context"
 
@@ -2603,6 +2603,7 @@ class Module:
         options["llvm_cuda"] = config.llvm_cuda
         options["use_precompiled_headers"] = config.use_precompiled_headers
         options["verify_autograd_array_access"] = config.verify_autograd_array_access
+        options["optimize_tid"] = config.optimize_tid
 
         # Resolve None-means-autodetect for enable_tiles_in_stack_memory
         enable_tiles = config.enable_tiles_in_stack_memory
@@ -2764,6 +2765,8 @@ class Module:
         """Get the hash of the module for the current block_dim.
 
         If a hash has not been computed for the current block_dim, it will be computed and cached.
+        A cached hasher is invalidated when the resolved module options change — e.g., when a
+        global ``warp.config`` flag that participates in the hash is flipped between calls.
         """
         if block_dim is None:
             block_dim = self.options["block_dim"]
@@ -2774,8 +2777,10 @@ class Module:
             _ = ModuleBuilder(self, builder_options)
             self.has_unresolved_static_expressions = False
 
-        if block_dim not in self.hashers:
-            options = self.resolve_options(warp.config)
+        # Re-resolve options on every call so changes to global config (e.g. optimize_tid)
+        # invalidate the cached hasher and trigger a fresh ModuleHasher build.
+        options = self.resolve_options(warp.config)
+        if block_dim not in self.hashers or self.resolved_options.get(block_dim) != options:
             self.hashers[block_dim] = ModuleHasher(self._get_live_kernels(), options)
             self.resolved_options[block_dim] = options
 
@@ -8165,14 +8170,11 @@ def _build_rank_error(
 
     if ndim > kernel_dim:
         options = []
-        # Launch-side fixes only make sense when the kernel is already scalar.
-        # For kernel_dim >= 2, these would require a second (kernel-side) edit
-        # to actually succeed, so presenting them as single-step fixes would
-        # mislead the user.
+        # Launch-side fixes apply only when kernel_dim==1; for kernel_dim>=2
+        # they'd need a kernel edit too, so omit them to avoid misleading hints.
         if kernel_dim == 1:
             options.append(f"  - flat linear index over {flat} threads: launch with dim={flat}")
             options.append(f"  - first-dim index (0..{dim[0] - 1}, no repetition): launch with dim={dim[0]}")
-        # Kernel-side fixes are always applicable.
         repeat_unpack = "i, " + ", ".join(["_"] * (ndim - 1)) + " = wp.tid()"
         options.append(f"  - first-dim index with repetition: unpack as `{repeat_unpack}`")
         options.append(f"  - per-dim indexing: unpack as `{_tid_unpack(ndim)}`")
@@ -8180,8 +8182,8 @@ def _build_rank_error(
         # ndim < kernel_dim: under-rank
         padded = dim + (1,) * (kernel_dim - ndim)
         options = [f"  - keep {kernel_dim}-D kernel, launch with matching rank: dim={padded}"]
-        # Tiled launches also accept len(dim) == kernel_dim - 1 (block_dim axis is implicit);
-        # offer that as a concrete alternative when it differs from the rank-matching option.
+        # launch_tiled also accepts len(dim) == kernel_dim - 1 (block_dim implicit);
+        # offer that when it differs from the rank-matching option.
         if tiled and kernel_dim >= 2:
             padded_tiled = dim + (1,) * (kernel_dim - 1 - ndim)
             options.append(
@@ -8211,7 +8213,7 @@ def _prepare_launch_dim(
 ) -> tuple[int, ...]:
     """Canonicalize ``dim`` and check its rank against the kernel's ``wp.tid()`` arity.
 
-    For kernels that do not call ``wp.tid()`` (``max_tid_dimensionality == 0``),
+    For kernels that do not call ``wp.tid()`` (``tid_arity == 0``),
     any ``dim`` is accepted and flattened to a 1-tuple total thread count, since
     the kernel is dim-agnostic.
 
@@ -8219,10 +8221,15 @@ def _prepare_launch_dim(
     ``kernel.adj.kernel_dim`` (or ``kernel_dim - 1`` when ``tiled=True``, since
     ``launch_tiled`` supplies the block_dim axis implicitly).
 
+    With ``warp.config.optimize_tid`` off (the default), the rank check is
+    skipped: any ``dim`` of rank :math:`\\le` ``LAUNCH_MAX_DIMS`` is accepted
+    and padded with trailing ones. Tiled launches return ``dim`` unpadded;
+    ``_construct_tiled_bounds`` handles the ``block_dim`` axis.
+
     Args:
         dim: An integer or sequence of integers giving the launch shape.
         kernel: The target kernel; its ``adj.kernel_dim`` and
-          ``adj.max_tid_dimensionality`` attributes drive validation.
+          ``adj.tid_arity`` attributes drive validation.
         tiled: If ``True``, also accept ``len(dim) == kernel_dim - 1`` (the
           ``launch_tiled`` path, which supplies the block_dim axis implicitly).
 
@@ -8234,10 +8241,24 @@ def _prepare_launch_dim(
           arity. The message lists the valid migration options.
     """
     dim = _canonicalize_dim(dim)
-    if kernel.adj.max_tid_dimensionality == 0:
+    if kernel.adj.tid_arity == 0:
         # Kernel is dim-agnostic — collapse to total thread count so it fits the
         # default launch_bounds_t<1> ABI. Not validation; a bypass.
-        return (math.prod(dim),) if dim else (0,)
+        # math.prod(()) == 1, matching pre-1.12 behavior for dim=().
+        return (math.prod(dim),)
+    if not warp.config.optimize_tid:
+        # Not optimized: accept rank ≤ LAUNCH_MAX_DIMS (minus one for tiled,
+        # which reserves the trailing axis for block_dim). Tiled returns dim
+        # unpadded; non-tiled pads to kernel_dim with trailing 1s.
+        max_rank = LAUNCH_MAX_DIMS - 1 if tiled else LAUNCH_MAX_DIMS
+        if len(dim) > max_rank:
+            raise ValueError(
+                f"Launch dim rank {len(dim)} exceeds LAUNCH_MAX_DIMS={LAUNCH_MAX_DIMS}"
+                + (" (one axis is reserved for block_dim in tiled launches)" if tiled else "")
+            )
+        if tiled:
+            return dim
+        return dim + (1,) * (kernel.adj.kernel_dim - len(dim))
     expected = kernel.adj.kernel_dim
     if tiled and len(dim) == expected - 1:
         # launch_tiled: kernel_dim may legitimately be ndim+1 because block_dim
@@ -8251,29 +8272,38 @@ def _prepare_launch_dim(
 def _construct_tiled_bounds(dim, block_dim, kernel):
     """Construct launch bounds for a tiled launch.
 
-    Delegates rank validation to ``_prepare_launch_dim(tiled=True)``, which
-    either returns a canonicalized dim tuple with ``len(dim)`` in
-    ``{kernel_dim, kernel_dim - 1}`` (or ``(prod(dim),)`` for zero-tid
-    kernels), or raises ``ValueError``. Given that postcondition:
+    Delegates rank validation to ``_prepare_launch_dim(tiled=True)``.
+
+    Under ``optimize_tid=True``, two cases follow from the validated rank:
 
     - ``len(dim) == kernel_dim``: user's ``wp.tid()`` covers only user dims;
-      set ``tiled=True`` so ``launch_coord()`` divides out ``block_dim()``.
+      set ``bounds.tiled`` so ``launch_coord()`` divides out ``block_dim()``.
     - ``len(dim) == kernel_dim - 1``: user's ``wp.tid()`` explicitly covers
       the ``block_dim`` axis; append ``block_dim`` to the shape.
+
+    Under ``optimize_tid=False`` (the default) with a tid kernel, ``block_dim``
+    is appended and the shape padded to ``LAUNCH_MAX_DIMS``; ``bounds.tiled``
+    stays False so ``launch_coord()`` does a full 4-axis unravel (pre-1.12).
     """
     dim = _prepare_launch_dim(dim, kernel, tiled=True)
+
+    if not warp.config.optimize_tid and kernel.adj.tid_arity > 0:
+        # Not optimized: append block_dim and pad to LAUNCH_MAX_DIMS with 1s.
+        # bounds.tiled stays False — the 4-D unravel directly yields user
+        # coord + block_tid, matching pre-1.12 semantics.
+        padded = (*dim, block_dim) + (1,) * (LAUNCH_MAX_DIMS - len(dim) - 1)
+        return launch_bounds_t(padded)
+
     kernel_dim = kernel.adj.kernel_dim
     ndim = len(dim)
 
-    # _prepare_launch_dim with tiled=True accepts ndim in (kernel_dim, kernel_dim-1)
-    # or flattens zero-tid kernels to a 1-tuple. After that call:
     if ndim == kernel_dim:
-        # wp.tid() returns user dims only — block_dim threads share coordinates
+        # wp.tid() covers user dims only — block_dim threads share coordinates.
         bounds = launch_bounds_t(dim)
         bounds.size *= block_dim
         bounds.tiled = True
     else:
-        # ndim == kernel_dim - 1: wp.tid() explicitly covers the block_dim dimension
+        # ndim == kernel_dim - 1: wp.tid() explicitly covers the block_dim axis.
         bounds = launch_bounds_t((*dim, block_dim))
 
     return bounds

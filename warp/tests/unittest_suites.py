@@ -206,6 +206,7 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
     from warp.tests.test_template_launch_bounds import (
         TestBuildRankError,
         TestPrepareLaunchDim,
+        TestPrepareLaunchDimPadding,
         TestTemplateLaunchBounds,
         TestTidUnpack,
     )
@@ -356,6 +357,7 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
         TestTape,
         TestBuildRankError,
         TestPrepareLaunchDim,
+        TestPrepareLaunchDimPadding,
         TestTemplateLaunchBounds,
         TestTidUnpack,
         TestTexture,

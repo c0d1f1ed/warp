@@ -129,7 +129,10 @@ cudaMalloc(&d_x, N * sizeof(float));
 cudaMalloc(&d_y, N * sizeof(float));
 
 // 3. Create Warp data structures (kernel signature: saxpy(alpha, x, y))
-wp::launch_bounds_t<1> dim = {{N}, size_t(N), false};
+// launch_bounds_t<N> must match the compiled kernel. Default
+// (wp.config.optimize_tid=False) gives N=4 for every tid kernel;
+// optimize_tid=True makes N match the kernel's wp.tid() arity.
+wp::launch_bounds_t<4> dim = {{N, 1, 1, 1}, size_t(N), false};
 wp::float32 alpha = 2.5f;  // Scalar parameter
 wp::array_t<wp::float32> arr_x(d_x, N);
 wp::array_t<wp::float32> arr_y(d_y, N);

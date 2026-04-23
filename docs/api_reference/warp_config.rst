@@ -34,6 +34,7 @@ API
    max_unroll
    mode
    optimization_level
+   optimize_tid
    print_launches
    ptx_target_arch
    quiet

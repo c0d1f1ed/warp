@@ -84,9 +84,14 @@ int main()
 
     std::cout << "Initial guess: y = " << h_params[0] << "*x + " << h_params[1] << std::endl;
 
-    // Prepare Warp structures
-    // CRITICAL: Using positional initialization for MSVC compatibility
-    wp::launch_bounds_t<1> dim = { { N_SAMPLES }, size_t(N_SAMPLES), false };
+    // Prepare Warp structures.
+    // CRITICAL: Using positional initialization for MSVC compatibility.
+    //
+    // launch_bounds_t<N> must match the compiled kernel. N is set by
+    // wp.config.optimize_tid at AOT compile time: default (False) gives N=4
+    // for every tid kernel (pad with trailing 1s); True makes N match the
+    // kernel's wp.tid() unpack arity (1-4).
+    wp::launch_bounds_t<4> dim = { { N_SAMPLES, 1, 1, 1 }, size_t(N_SAMPLES), false };
 
     wp::array_t<wp::float32> arr_params(d_params, 2);
     wp::array_t<wp::float32> arr_x(d_x, N_SAMPLES);
@@ -148,7 +153,8 @@ int main()
 
         // Update parameters on GPU: params -= (learning_rate / N_SAMPLES) * gradients
         float normalized_lr = LEARNING_RATE / N_SAMPLES;
-        update_params_cuda_kernel_forward<<<1, 2>>>({ { 2 }, size_t(2), false }, normalized_lr, adj_params, arr_params);
+        wp::launch_bounds_t<4> update_dim = { { 2, 1, 1, 1 }, size_t(2), false };
+        update_params_cuda_kernel_forward<<<1, 2>>>(update_dim, normalized_lr, adj_params, arr_params);
         CHECK_CUDA(cudaGetLastError());
 
         if (iter % 10 == 0) {

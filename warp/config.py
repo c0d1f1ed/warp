@@ -104,6 +104,19 @@ Set to ``True`` to restore the pre-1.12 behavior where all scalar
 operations return Python built-in types (``int``, ``float``, ``bool``).
 """
 
+optimize_tid: bool = False
+"""Optimize ``wp.tid()`` by specializing on the kernel's actual unpack arity.
+
+When ``True``, ``wp.tid()`` is specialized to the number of variables the
+kernel unpacks (1, 2, 3, or 4), cutting register pressure and instruction
+count for kernels that use fewer dimensions.
+
+As a necessary consequence, the launch ``dim`` rank must match the
+kernel's ``wp.tid()`` arity exactly. ``wp.launch()``, ``Launch.set_dim()``,
+``wp.launch_tiled()``, and the experimental JAX FFI paths raise
+``ValueError`` on mismatch, with a hint listing the valid fix options.
+"""
+
 cache_kernels: bool = True
 """Enable kernel caching between application launches."""
 

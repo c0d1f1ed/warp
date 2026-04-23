@@ -100,9 +100,15 @@ int main(int argc, char** argv)
     std::cout << "Allocated " << (2 * size_bytes) / (1024 * 1024) << " MB on device" << std::endl;
     std::cout << "Array size: " << ARRAY_SIZE << " elements, Alpha: " << ALPHA << std::endl;
 
-    // Prepare kernel parameters
-    // CRITICAL: Using positional initialization for MSVC compatibility
-    wp::launch_bounds_t<1> dim = { { ARRAY_SIZE }, size_t(ARRAY_SIZE), false };
+    // Prepare kernel parameters.
+    // CRITICAL: Using positional initialization for MSVC compatibility.
+    //
+    // launch_bounds_t<N> must match the compiled kernel exactly — a mismatch
+    // silently mispacks the Driver API param blob. N is set by
+    // wp.config.optimize_tid at AOT compile time: default (False) gives N=4
+    // for every tid kernel (pad with trailing 1s); True makes N match the
+    // kernel's wp.tid() unpack arity (1-4).
+    wp::launch_bounds_t<4> dim = { { ARRAY_SIZE, 1, 1, 1 }, size_t(ARRAY_SIZE), false };
     wp::array_t<wp::float32> arr_x(d_x, ARRAY_SIZE);
     wp::array_t<wp::float32> arr_y(d_y, ARRAY_SIZE);
     wp::float32 alpha_scalar = ALPHA;
