@@ -17,6 +17,7 @@ import inspect
 import io
 import itertools
 import json
+import math
 import operator
 import os
 import platform
@@ -7884,6 +7885,7 @@ class Launch:
         max_blocks: int = 0,
         block_dim: int = 256,
         adjoint: bool = False,
+        tiled: bool = False,
     ):
         # retain the module executable so it doesn't get unloaded
         self.module_exec = kernel.module.load(device, block_dim)
@@ -7951,14 +7953,28 @@ class Launch:
         self.adjoint: bool = adjoint
         """Whether to run the adjoint kernel instead of the forward kernel."""
 
+        self.tiled: bool = tiled
+        """True if this launch was created via :func:`wp.launch_tiled`. Used by
+        :meth:`set_dim` to route replays through the tiled dim-validation path.
+        Not the same as ``bounds.tiled``; see ``_construct_tiled_bounds`` for
+        when each is set.
+        """
+
     def set_dim(self, dim: int | list[int] | tuple[int, ...]):
         """Set the launch dimensions.
+
+        For recorded tiled launches (``self.tiled == True``), reconstructs
+        bounds via the same tiled path used at record time so the user-rank
+        semantics (block axis implicit or unpacked) are preserved.
 
         Args:
             dim: The dimensions of the launch.
         """
-        normalized = _normalize_launch_dim(dim, self.kernel.adj.kernel_dim)
-        self.bounds = launch_bounds_t(normalized)
+        if self.tiled:
+            self.bounds = _construct_tiled_bounds(dim, self.block_dim, self.kernel)
+        else:
+            normalized = _prepare_launch_dim(dim, self.kernel)
+            self.bounds = launch_bounds_t(normalized)
 
         # launch bounds always at index 0
         self.params[0] = self.bounds
@@ -8108,60 +8124,81 @@ def _canonicalize_dim(dim: int | Sequence[int]) -> tuple[int, ...]:
     return tuple(dim)
 
 
-def _normalize_launch_dim(dim: int | Sequence[int], kernel_dim: int) -> tuple[int, ...]:
-    """Reshape *dim* to exactly *kernel_dim* dimensions for ABI compatibility.
+def _prepare_launch_dim(
+    dim,  # int | Sequence[int]
+    kernel,
+    *,
+    tiled: bool = False,
+) -> tuple[int, ...]:
+    """Canonicalize ``dim`` and check its rank against the kernel's ``wp.tid()`` arity.
 
-    The compiled C++ kernel expects ``launch_bounds_t<kernel_dim>``, so the
-    Python-side ctypes struct must have exactly *kernel_dim* shape elements.
-    Excess dimensions are folded into the last slot; missing dimensions are
-    padded with ones.
+    For kernels that do not call ``wp.tid()`` (``max_tid_dimensionality == 0``),
+    any ``dim`` is accepted and flattened to a 1-tuple total thread count, since
+    the kernel is dim-agnostic.
+
+    For kernels that call ``wp.tid()``, the rank of ``dim`` must equal
+    ``kernel.adj.kernel_dim`` (or ``kernel_dim - 1`` when ``tiled=True``, since
+    ``launch_tiled`` supplies the block_dim axis implicitly).
+
+    Args:
+        dim: An integer or sequence of integers giving the launch shape.
+        kernel: The target kernel; its ``adj.kernel_dim`` and
+          ``adj.max_tid_dimensionality`` attributes drive validation.
+        tiled: If ``True``, also accept ``len(dim) == kernel_dim - 1`` (the
+          ``launch_tiled`` path, which supplies the block_dim axis implicitly).
+
+    Returns:
+        The canonicalized ``dim`` tuple, ready to pass to ``launch_bounds_t(...)``.
+
+    Raises:
+        ValueError: The rank of ``dim`` does not match the kernel's ``wp.tid()``
+          arity.
     """
     dim = _canonicalize_dim(dim)
-    ndim = len(dim)
-    if ndim == kernel_dim:
+    if kernel.adj.max_tid_dimensionality == 0:
+        # Kernel is dim-agnostic — collapse to total thread count so it fits the
+        # default launch_bounds_t<1> ABI. Not validation; a bypass.
+        return (math.prod(dim),) if dim else (0,)
+    expected = kernel.adj.kernel_dim
+    if tiled and len(dim) == expected - 1:
+        # launch_tiled: kernel_dim may legitimately be ndim+1 because block_dim
+        # adds the trailing axis implicitly.
         return dim
-    elif ndim < kernel_dim:
-        return dim + (1,) * (kernel_dim - ndim)
-    else:
-        head = dim[: kernel_dim - 1]
-        tail_product = 1
-        for d in dim[kernel_dim - 1 :]:
-            tail_product *= d
-        return (*head, tail_product)
+    if len(dim) == expected:
+        return dim
+    raise ValueError(
+        f"Launch dim {dim} (rank {len(dim)}) does not match kernel '{kernel.key}' "
+        f"wp.tid() arity (kernel_dim={expected})."
+    )
 
 
 def _construct_tiled_bounds(dim, block_dim, kernel):
     """Construct launch bounds for a tiled launch.
 
-    After compilation, kernel_dim tells us how many dimensions wp.tid() uses.
-    If it matches len(dim), the user's wp.tid() covers only the user-facing
-    dims and we set tiled=True so launch_coord divides out block_dim().
-    If it's len(dim)+1, the user explicitly covers the block_dim dimension
-    in their wp.tid() call, so we append block_dim to the shape.
+    Delegates rank validation to ``_prepare_launch_dim(tiled=True)``, which
+    either returns a canonicalized dim tuple with ``len(dim)`` in
+    ``{kernel_dim, kernel_dim - 1}`` (or ``(prod(dim),)`` for zero-tid
+    kernels), or raises ``ValueError``. Given that postcondition:
+
+    - ``len(dim) == kernel_dim``: user's ``wp.tid()`` covers only user dims;
+      set ``tiled=True`` so ``launch_coord()`` divides out ``block_dim()``.
+    - ``len(dim) == kernel_dim - 1``: user's ``wp.tid()`` explicitly covers
+      the ``block_dim`` axis; append ``block_dim`` to the shape.
     """
-    dim = _canonicalize_dim(dim)
-    ndim = len(dim)
+    dim = _prepare_launch_dim(dim, kernel, tiled=True)
     kernel_dim = kernel.adj.kernel_dim
+    ndim = len(dim)
 
-    if kernel.adj.max_tid_dimensionality == 0:
-        # No wp.tid() calls — flatten to 1D, only total thread count matters.
-        dim = _normalize_launch_dim(dim, 1)
-        ndim = 1
-
-    if kernel_dim == ndim:
+    # _prepare_launch_dim with tiled=True accepts ndim in (kernel_dim, kernel_dim-1)
+    # or flattens zero-tid kernels to a 1-tuple. After that call:
+    if ndim == kernel_dim:
         # wp.tid() returns user dims only — block_dim threads share coordinates
         bounds = launch_bounds_t(dim)
         bounds.size *= block_dim
         bounds.tiled = True
-    elif kernel_dim == ndim + 1:
-        # wp.tid() explicitly covers the block_dim dimension
-        bounds = launch_bounds_t((*dim, block_dim))
     else:
-        raise RuntimeError(
-            f"Tiled launch dimension mismatch for kernel '{kernel.key}': "
-            f"wp.tid() uses {kernel_dim} dimensions but launch_tiled was given {ndim} user dimensions. "
-            f"Expected kernel_dim to be {ndim} or {ndim + 1}."
-        )
+        # ndim == kernel_dim - 1: wp.tid() explicitly covers the block_dim dimension
+        bounds = launch_bounds_t((*dim, block_dim))
 
     return bounds
 
@@ -8276,7 +8313,7 @@ def launch(
         if tiled:
             bounds = _construct_tiled_bounds(dim, block_dim, kernel)
         else:
-            normalized = _normalize_launch_dim(dim, kernel.adj.kernel_dim)
+            normalized = _prepare_launch_dim(dim, kernel)
             bounds = launch_bounds_t(normalized)
 
         # first param is the number of threads
@@ -8321,6 +8358,7 @@ def launch(
                     device=device,
                     block_dim=block_dim,
                     adjoint=adjoint,
+                    tiled=tiled,
                 )
                 return launch
 
@@ -8398,6 +8436,7 @@ def launch(
                         max_blocks=max_blocks,
                         block_dim=block_dim,
                         adjoint=adjoint,
+                        tiled=tiled,
                     )
                     return launch
                 else:
@@ -8435,6 +8474,7 @@ def launch(
                         device=device,
                         max_blocks=max_blocks,
                         block_dim=block_dim,
+                        tiled=tiled,
                     )
                     return launch
                 else:
