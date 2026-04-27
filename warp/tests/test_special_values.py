@@ -229,6 +229,161 @@ def test_is_special_mat(test, device, dtype, register_kernels=False):
     test.assertFalse(outputs_bool_cpu[8], "wp.isnan(inf_mat) is not False")
 
 
+def assert_float_eq(test, actual, expected, msg):
+    """Compare two floats, treating NaN as equal to NaN and distinguishing signed zeros."""
+    actual_f = float(actual)
+    expected_f = float(expected)
+    test.assertEqual(
+        math.isnan(actual_f),
+        math.isnan(expected_f),
+        f"{msg}: NaN mismatch (actual={actual_f}, expected={expected_f})",
+    )
+    if not math.isnan(expected_f):
+        test.assertEqual(actual_f, expected_f, f"{msg}: value mismatch (actual={actual_f}, expected={expected_f})")
+        if expected_f == 0.0:
+            test.assertEqual(
+                math.copysign(1.0, actual_f),
+                math.copysign(1.0, expected_f),
+                f"{msg}: signed-zero mismatch (actual={actual_f}, expected={expected_f})",
+            )
+
+
+def test_minmax_special_values_scalar(test, device, dtype, register_kernels=False):
+    # wp.min/wp.max are implemented as `a<b?a:b` and `a>b?a:b` respectively
+    # (see `DECLARE_FLOAT_OPS` in warp/native/builtin.h). They therefore return
+    # the second argument on every "tie" the comparison cannot resolve --
+    # including NaN inputs and signed zeros that compare equal. No NumPy
+    # function (np.minimum, np.maximum, np.fmin, np.fmax, np.min, np.max)
+    # exhibits this asymmetry, so expected values are written out explicitly.
+    # See GH-1376.
+
+    def check_minmax(
+        a: wp.array(dtype=dtype),
+        b: wp.array(dtype=dtype),
+        mn: wp.array(dtype=dtype),
+        mx: wp.array(dtype=dtype),
+    ):
+        i = wp.tid()
+        mn[i] = wp.min(a[i], b[i])
+        mx[i] = wp.max(a[i], b[i])
+
+    kernel = getkernel(check_minmax, suffix=dtype.__name__)
+
+    if register_kernels:
+        return
+
+    nan = float("nan")
+    inputs_a = [-1.0, nan, nan, -1.0, -0.0, 0.0, nan, 2.0]
+    inputs_b = [nan, -1.0, nan, 2.0, 0.0, -0.0, 2.0, nan]
+    # Both wp.min and wp.max return the second argument on every tie:
+    #   * either operand is NaN and the other side of the comparison is false
+    #   * signed zeros compare equal so `<` / `>` are both false
+    expected_min = [nan, -1.0, nan, -1.0, 0.0, -0.0, 2.0, nan]
+    expected_max = [nan, -1.0, nan, 2.0, 0.0, -0.0, 2.0, nan]
+
+    n = len(inputs_a)
+    a = wp.array(inputs_a, dtype=dtype, device=device)
+    b = wp.array(inputs_b, dtype=dtype, device=device)
+    mn = wp.empty(n, dtype=dtype, device=device)
+    mx = wp.empty(n, dtype=dtype, device=device)
+    wp.launch(kernel, dim=n, inputs=[a, b], outputs=[mn, mx], device=device)
+
+    actual_min = mn.to("cpu").list()
+    actual_max = mx.to("cpu").list()
+    for i in range(n):
+        assert_float_eq(test, actual_min[i], expected_min[i], f"wp.min({inputs_a[i]}, {inputs_b[i]})")
+        assert_float_eq(test, actual_max[i], expected_max[i], f"wp.max({inputs_a[i]}, {inputs_b[i]})")
+
+
+def test_minmax_special_values_vec(test, device, dtype, register_kernels=False):
+    # Element-wise wp.min/wp.max over vec3 apply the scalar `a<b?a:b` rule
+    # per component. Vector reduction wp.min(v) / wp.max(v) seeds the result
+    # with v[0] and only updates if `v[i] < ret` / `v[i] > ret`, so a NaN at
+    # index 0 sticks but NaN at later indices is silently skipped. See GH-1376.
+    vec3_t = wp.types.vector(3, dtype)
+
+    def check_vec_elementwise(
+        a: wp.array(dtype=vec3_t),
+        b: wp.array(dtype=vec3_t),
+        mn: wp.array(dtype=vec3_t),
+        mx: wp.array(dtype=vec3_t),
+    ):
+        i = wp.tid()
+        mn[i] = wp.min(a[i], b[i])
+        mx[i] = wp.max(a[i], b[i])
+
+    def check_vec_reduce(
+        a: wp.array(dtype=vec3_t),
+        red_mn: wp.array(dtype=dtype),
+        red_mx: wp.array(dtype=dtype),
+    ):
+        i = wp.tid()
+        red_mn[i] = wp.min(a[i])
+        red_mx[i] = wp.max(a[i])
+
+    kernel_elem = getkernel(check_vec_elementwise, suffix=dtype.__name__)
+    kernel_red = getkernel(check_vec_reduce, suffix=dtype.__name__)
+
+    if register_kernels:
+        return
+
+    nan = float("nan")
+
+    # Element-wise: NaN at any matching component, and signed zero tie cases.
+    elem_a = [
+        [-1.0, nan, nan],
+        [-1.0, 2.0, -0.0],
+    ]
+    elem_b = [
+        [nan, -1.0, nan],
+        [2.0, -1.0, 0.0],
+    ]
+    expected_elem_mn = [
+        [nan, -1.0, nan],
+        [-1.0, -1.0, 0.0],
+    ]
+    expected_elem_mx = [
+        [nan, -1.0, nan],
+        [2.0, 2.0, 0.0],
+    ]
+
+    n_elem = len(elem_a)
+    a_arr = wp.array(elem_a, dtype=vec3_t, device=device)
+    b_arr = wp.array(elem_b, dtype=vec3_t, device=device)
+    mn = wp.empty(n_elem, dtype=vec3_t, device=device)
+    mx = wp.empty(n_elem, dtype=vec3_t, device=device)
+    wp.launch(kernel_elem, dim=n_elem, inputs=[a_arr, b_arr], outputs=[mn, mx], device=device)
+
+    actual_mn = mn.numpy()
+    actual_mx = mx.numpy()
+    for i in range(n_elem):
+        for j in range(3):
+            assert_float_eq(test, actual_mn[i][j], expected_elem_mn[i][j], f"wp.min(vec3, vec3)[{i}][{j}]")
+            assert_float_eq(test, actual_mx[i][j], expected_elem_mx[i][j], f"wp.max(vec3, vec3)[{i}][{j}]")
+
+    # Reduction: NaN at index 0 survives; NaN at later indices is dropped.
+    red_a = [
+        [nan, -1.0, 2.0],  # NaN first -> result is NaN
+        [-1.0, nan, 2.0],  # NaN middle -> -1 (min) / 2 (max), NaN skipped
+        [-1.0, 2.0, nan],  # NaN last -> -1 (min) / 2 (max)
+        [-1.0, 2.0, 0.5],  # finite -> -1 (min) / 2 (max)
+    ]
+    expected_red_mn = [nan, -1.0, -1.0, -1.0]
+    expected_red_mx = [nan, 2.0, 2.0, 2.0]
+
+    n_red = len(red_a)
+    red_arr = wp.array(red_a, dtype=vec3_t, device=device)
+    red_mn = wp.empty(n_red, dtype=dtype, device=device)
+    red_mx = wp.empty(n_red, dtype=dtype, device=device)
+    wp.launch(kernel_red, dim=n_red, inputs=[red_arr], outputs=[red_mn, red_mx], device=device)
+
+    actual_red_mn = red_mn.to("cpu").list()
+    actual_red_mx = red_mx.to("cpu").list()
+    for i in range(n_red):
+        assert_float_eq(test, actual_red_mn[i], expected_red_mn[i], f"wp.min(vec3)[row {i}]")
+        assert_float_eq(test, actual_red_mx[i], expected_red_mx[i], f"wp.max(vec3)[row {i}]")
+
+
 def test_is_special_quat(test, device, dtype, register_kernels=False):
     quat_type = wp.types.quaternion(dtype)
 
@@ -412,6 +567,20 @@ for dtype in [wp.float16, wp.float32, wp.float64]:
     )
     add_function_test_register_kernel(
         TestSpecialValues, f"test_is_special_quat_{dtype.__name__}", test_is_special_quat, devices=devices, dtype=dtype
+    )
+    add_function_test_register_kernel(
+        TestSpecialValues,
+        f"test_minmax_special_values_scalar_{dtype.__name__}",
+        test_minmax_special_values_scalar,
+        devices=devices,
+        dtype=dtype,
+    )
+    add_function_test_register_kernel(
+        TestSpecialValues,
+        f"test_minmax_special_values_vec_{dtype.__name__}",
+        test_minmax_special_values_vec,
+        devices=devices,
+        dtype=dtype,
     )
     add_function_test_register_kernel(
         TestSpecialValues,
