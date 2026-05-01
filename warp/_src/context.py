@@ -200,6 +200,7 @@ class Function:
         generic: bool = False,
         native_func: str | None = None,
         defaults: dict[str, Any] | None = None,
+        adjoint_takes_template_args: bool = False,
         custom_replay_func: Function | None = None,
         native_snippet: str | None = None,
         adj_native_snippet: str | None = None,
@@ -225,6 +226,7 @@ class Function:
         self.export_func = export_func
         self.dispatch_func = dispatch_func
         self.lto_dispatch_func = lto_dispatch_func
+        self.adjoint_takes_template_args = adjoint_takes_template_args
         self.input_types = {}
         self.export = export
         self.doc = doc
@@ -1654,6 +1656,7 @@ def add_builtin(
     native_func: str | None = None,
     defaults: dict[str, Any] | None = None,
     require_original_output_arg: bool = False,
+    adjoint_takes_template_args: bool = False,
 ):
     """Main entry point to register a new built-in function.
 
@@ -1704,6 +1707,12 @@ def add_builtin(
         require_original_output_arg: Used during the codegen stage to
             specify whether an adjoint parameter corresponding to the return
             value should be included in the signature of the backward function.
+        adjoint_takes_template_args: Whether the adjoint of this builtin accepts
+            the same template arguments as the forward (as returned by
+            ``dispatch_func`` or ``lto_dispatch_func``). When True, the generated
+            adjoint call is ``wp::adj_<name><template_args>(...)`` instead of
+            ``wp::adj_<name>(...)``. Required for tag-dispatched builtins like
+            ``wp.min`` / ``wp.max`` / ``wp.clamp``.
     """
     if input_types is None:
         input_types = {}
@@ -1830,6 +1839,7 @@ def add_builtin(
                     is_differentiable=is_differentiable,
                     defaults=defaults,
                     require_original_output_arg=require_original_output_arg,
+                    adjoint_takes_template_args=adjoint_takes_template_args,
                 )
 
     func = Function(
@@ -1854,6 +1864,7 @@ def add_builtin(
         native_func=native_func,
         defaults=defaults,
         require_original_output_arg=require_original_output_arg,
+        adjoint_takes_template_args=adjoint_takes_template_args,
     )
 
     if key in builtin_functions:
@@ -2635,6 +2646,7 @@ class Module:
         options["llvm_cuda"] = config.llvm_cuda
         options["use_precompiled_headers"] = config.use_precompiled_headers
         options["verify_autograd_array_access"] = config.verify_autograd_array_access
+        options["standard_min_max"] = config.standard_min_max
 
         # Resolve None-means-autodetect for enable_tiles_in_stack_memory
         enable_tiles = config.enable_tiles_in_stack_memory

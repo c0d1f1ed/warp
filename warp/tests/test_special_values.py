@@ -4,6 +4,8 @@
 import math
 import unittest
 
+import numpy as np
+
 import warp as wp
 from warp.tests.unittest_utils import *
 
@@ -255,7 +257,6 @@ def test_minmax_special_values_scalar(test, device, dtype, register_kernels=Fals
     # including NaN inputs and signed zeros that compare equal. No NumPy
     # function (np.minimum, np.maximum, np.fmin, np.fmax, np.min, np.max)
     # exhibits this asymmetry, so expected values are written out explicitly.
-    # See GH-1376.
 
     def check_minmax(
         a: wp.array(dtype=dtype),
@@ -299,7 +300,7 @@ def test_minmax_special_values_vec(test, device, dtype, register_kernels=False):
     # Element-wise wp.min/wp.max over vec3 apply the scalar `a<b?a:b` rule
     # per component. Vector reduction wp.min(v) / wp.max(v) seeds the result
     # with v[0] and only updates if `v[i] < ret` / `v[i] > ret`, so a NaN at
-    # index 0 sticks but NaN at later indices is silently skipped. See GH-1376.
+    # index 0 sticks but NaN at later indices is silently skipped.
     vec3_t = wp.types.vector(3, dtype)
 
     def check_vec_elementwise(
@@ -382,6 +383,176 @@ def test_minmax_special_values_vec(test, device, dtype, register_kernels=False):
     for i in range(n_red):
         assert_float_eq(test, actual_red_mn[i], expected_red_mn[i], f"wp.min(vec3)[row {i}]")
         assert_float_eq(test, actual_red_mx[i], expected_red_mx[i], f"wp.max(vec3)[row {i}]")
+
+
+def test_minmax_standard_scalar(test, device, dtype, register_kernels=False):
+    # When wp.config.standard_min_max is True, wp.min / wp.max / wp.clamp
+    # follow C fmin/fmax semantics (NaN-as-missing, symmetric). NumPy's np.fmin
+    # / np.fmax match this exactly for the NaN cases.
+
+    def check_minmax(
+        a: wp.array(dtype=dtype),
+        b: wp.array(dtype=dtype),
+        mn: wp.array(dtype=dtype),
+        mx: wp.array(dtype=dtype),
+        cmn: wp.array(dtype=dtype),
+        cmx: wp.array(dtype=dtype),
+    ):
+        i = wp.tid()
+        mn[i] = wp.min(a[i], b[i])
+        mx[i] = wp.max(a[i], b[i])
+        # clamp routes its internal min/max through the same tag, so the
+        # standard_min_max flag should also affect clamp.
+        cmn[i] = wp.clamp(a[i], dtype(-1.0), dtype(1.0))
+        cmx[i] = wp.clamp(b[i], dtype(-1.0), dtype(1.0))
+
+    kernel = getkernel(check_minmax, suffix="standard_" + dtype.__name__)
+
+    if register_kernels:
+        return
+
+    nan = float("nan")
+    # NaN-only probes -- C99 leaves signed-zero ties implementation-defined,
+    # so don't include ±0 cases here. (See test_minmax_special_values_scalar
+    # for the flag-off signed-zero coverage.)
+    inputs_a = [-1.0, nan, nan, -1.0, nan, 2.0]
+    inputs_b = [nan, -1.0, nan, 2.0, 2.0, nan]
+    # np.fmin / np.fmax are exact NumPy oracles for C fmin/fmax NaN handling.
+    expected_min = [float(np.fmin(np.float64(a), np.float64(b))) for a, b in zip(inputs_a, inputs_b, strict=True)]
+    expected_max = [float(np.fmax(np.float64(a), np.float64(b))) for a, b in zip(inputs_a, inputs_b, strict=True)]
+    # clamp(x, -1, 1) with NaN-as-missing semantics resolves NaN inputs to a
+    # finite bound; finite inputs clamp normally.
+    expected_clamp_a = [float(np.fmin(np.fmax(np.float64(a), -1.0), 1.0)) for a in inputs_a]
+    expected_clamp_b = [float(np.fmin(np.fmax(np.float64(b), -1.0), 1.0)) for b in inputs_b]
+
+    n = len(inputs_a)
+    saved = wp.config.standard_min_max
+    wp.config.standard_min_max = True
+    # The module hash caches the resolved options; flipping a global flag
+    # mid-session requires explicit invalidation so the new flag value is
+    # picked up at the next launch.
+    kernel.module.mark_modified()
+    try:
+        a = wp.array(inputs_a, dtype=dtype, device=device)
+        b = wp.array(inputs_b, dtype=dtype, device=device)
+        mn = wp.empty(n, dtype=dtype, device=device)
+        mx = wp.empty(n, dtype=dtype, device=device)
+        cmn = wp.empty(n, dtype=dtype, device=device)
+        cmx = wp.empty(n, dtype=dtype, device=device)
+        wp.launch(kernel, dim=n, inputs=[a, b], outputs=[mn, mx, cmn, cmx], device=device)
+        actual_min = mn.to("cpu").list()
+        actual_max = mx.to("cpu").list()
+        actual_clamp_a = cmn.to("cpu").list()
+        actual_clamp_b = cmx.to("cpu").list()
+    finally:
+        wp.config.standard_min_max = saved
+        kernel.module.mark_modified()
+
+    for i in range(n):
+        assert_float_eq(test, actual_min[i], expected_min[i], f"wp.min({inputs_a[i]}, {inputs_b[i]}) [standard]")
+        assert_float_eq(test, actual_max[i], expected_max[i], f"wp.max({inputs_a[i]}, {inputs_b[i]}) [standard]")
+        assert_float_eq(test, actual_clamp_a[i], expected_clamp_a[i], f"wp.clamp({inputs_a[i]}, -1, 1) [standard]")
+        assert_float_eq(test, actual_clamp_b[i], expected_clamp_b[i], f"wp.clamp({inputs_b[i]}, -1, 1) [standard]")
+
+
+def test_minmax_standard_vec(test, device, dtype, register_kernels=False):
+    # Element-wise vec wp.min / wp.max with standard_min_max=True applies
+    # fmin/fmax per component. Vector reduction folds with fmin/fmax so any
+    # non-NaN value wins regardless of position (the default-mode quirk where
+    # NaN at index 0 sticks is gone in standard mode).
+    vec3_t = wp.types.vector(3, dtype)
+
+    def check_vec_elementwise(
+        a: wp.array(dtype=vec3_t),
+        b: wp.array(dtype=vec3_t),
+        mn: wp.array(dtype=vec3_t),
+        mx: wp.array(dtype=vec3_t),
+    ):
+        i = wp.tid()
+        mn[i] = wp.min(a[i], b[i])
+        mx[i] = wp.max(a[i], b[i])
+
+    def check_vec_reduce(
+        a: wp.array(dtype=vec3_t),
+        red_mn: wp.array(dtype=dtype),
+        red_mx: wp.array(dtype=dtype),
+    ):
+        i = wp.tid()
+        red_mn[i] = wp.min(a[i])
+        red_mx[i] = wp.max(a[i])
+
+    kernel_elem = getkernel(check_vec_elementwise, suffix="standard_" + dtype.__name__)
+    kernel_red = getkernel(check_vec_reduce, suffix="standard_" + dtype.__name__)
+
+    if register_kernels:
+        return
+
+    nan = float("nan")
+
+    # Element-wise inputs: focus on NaN behavior. C99 leaves signed-zero ties
+    # implementation-defined for fmin/fmax, so don't include ±0 cases.
+    elem_a = [
+        [-1.0, nan, nan],
+        [-1.0, 2.0, 3.0],
+    ]
+    elem_b = [
+        [nan, -1.0, nan],
+        [2.0, -1.0, 1.0],
+    ]
+    elem_a_np = np.array(elem_a, dtype=np.float64)
+    elem_b_np = np.array(elem_b, dtype=np.float64)
+    expected_elem_mn = np.fmin(elem_a_np, elem_b_np)
+    expected_elem_mx = np.fmax(elem_a_np, elem_b_np)
+
+    # Reduction inputs: same as flag-off test, but expectations differ -- in
+    # standard mode, NaN never wins unless every element is NaN.
+    red_a = [
+        [nan, -1.0, 2.0],  # NaN first -> -1 (min) / 2 (max) (NaN ignored)
+        [-1.0, nan, 2.0],
+        [-1.0, 2.0, nan],
+        [-1.0, 2.0, 0.5],
+    ]
+    expected_red_mn = [-1.0, -1.0, -1.0, -1.0]
+    expected_red_mx = [2.0, 2.0, 2.0, 2.0]
+
+    saved = wp.config.standard_min_max
+    wp.config.standard_min_max = True
+    # See test_minmax_standard_scalar for why mark_modified is needed.
+    kernel_elem.module.mark_modified()
+    kernel_red.module.mark_modified()
+    try:
+        n_elem = len(elem_a)
+        a_arr = wp.array(elem_a, dtype=vec3_t, device=device)
+        b_arr = wp.array(elem_b, dtype=vec3_t, device=device)
+        mn = wp.empty(n_elem, dtype=vec3_t, device=device)
+        mx = wp.empty(n_elem, dtype=vec3_t, device=device)
+        wp.launch(kernel_elem, dim=n_elem, inputs=[a_arr, b_arr], outputs=[mn, mx], device=device)
+        actual_mn = mn.numpy()
+        actual_mx = mx.numpy()
+
+        n_red = len(red_a)
+        red_arr = wp.array(red_a, dtype=vec3_t, device=device)
+        red_mn = wp.empty(n_red, dtype=dtype, device=device)
+        red_mx = wp.empty(n_red, dtype=dtype, device=device)
+        wp.launch(kernel_red, dim=n_red, inputs=[red_arr], outputs=[red_mn, red_mx], device=device)
+        actual_red_mn = red_mn.to("cpu").list()
+        actual_red_mx = red_mx.to("cpu").list()
+    finally:
+        wp.config.standard_min_max = saved
+        kernel_elem.module.mark_modified()
+        kernel_red.module.mark_modified()
+
+    for i in range(n_elem):
+        for j in range(3):
+            assert_float_eq(
+                test, actual_mn[i][j], float(expected_elem_mn[i][j]), f"wp.min(vec3, vec3)[{i}][{j}] [standard]"
+            )
+            assert_float_eq(
+                test, actual_mx[i][j], float(expected_elem_mx[i][j]), f"wp.max(vec3, vec3)[{i}][{j}] [standard]"
+            )
+    for i in range(n_red):
+        assert_float_eq(test, actual_red_mn[i], expected_red_mn[i], f"wp.min(vec3)[row {i}] [standard]")
+        assert_float_eq(test, actual_red_mx[i], expected_red_mx[i], f"wp.max(vec3)[row {i}] [standard]")
 
 
 def test_is_special_quat(test, device, dtype, register_kernels=False):
@@ -579,6 +750,20 @@ for dtype in [wp.float16, wp.float32, wp.float64]:
         TestSpecialValues,
         f"test_minmax_special_values_vec_{dtype.__name__}",
         test_minmax_special_values_vec,
+        devices=devices,
+        dtype=dtype,
+    )
+    add_function_test_register_kernel(
+        TestSpecialValues,
+        f"test_minmax_standard_scalar_{dtype.__name__}",
+        test_minmax_standard_scalar,
+        devices=devices,
+        dtype=dtype,
+    )
+    add_function_test_register_kernel(
+        TestSpecialValues,
+        f"test_minmax_standard_vec_{dtype.__name__}",
+        test_minmax_standard_vec,
         devices=devices,
         dtype=dtype,
     )

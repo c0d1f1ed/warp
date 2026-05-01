@@ -665,6 +665,9 @@ def compute_type_str(base_name, template_params):
         return base_name
 
     def param2str(p):
+        if isinstance(p, str):
+            # Pre-formatted C++ token (e.g. a tag type name like "wp::nan_propagate_t").
+            return p
         if isinstance(p, builtins.bool):
             return "true" if p else "false"
         if isinstance(p, int):
@@ -1762,7 +1765,12 @@ class Adjoint:
                 require_original_output_arg=func.require_original_output_arg,
             )
             if arg_str is not None:
-                if func.lto_dispatch_func is not None:
+                # Propagate template args to the adjoint call when the builtin
+                # opts in (e.g. tag-dispatched min/max/clamp), or when going
+                # through the LTO path. Most adjoints rely on template-argument
+                # deduction from runtime args and would not match an explicit
+                # template-arg list.
+                if func.lto_dispatch_func is not None or getattr(func, "adjoint_takes_template_args", False):
                     adj_func_name = compute_type_str(func.native_func, template_args)
                 else:
                     adj_func_name = func.native_func

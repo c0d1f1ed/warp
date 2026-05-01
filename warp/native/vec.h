@@ -1217,28 +1217,36 @@ template <unsigned Length, typename Type> inline bool CUDA_CALLABLE isinf(vec_t<
     return false;
 }
 
+// Element-wise vector min/max. Tag dispatches to the scalar tagged
+// implementations in builtin.h. Default Tag = nan_propagate_t preserves the
+// historical `a<b?a:b` behavior for direct callers like bvh.cu and exports.h.
 // These two functions seem to compile very slowly
-template <unsigned Length, typename Type>
+template <typename Tag = nan_propagate_t, unsigned Length, typename Type>
 inline CUDA_CALLABLE vec_t<Length, Type> min(vec_t<Length, Type> a, vec_t<Length, Type> b)
 {
     vec_t<Length, Type> ret;
     for (unsigned i = 0; i < Length; ++i) {
-        ret[i] = a[i] < b[i] ? a[i] : b[i];
+        ret[i] = min<Tag>(a[i], b[i]);
     }
     return ret;
 }
 
-template <unsigned Length, typename Type>
+template <typename Tag = nan_propagate_t, unsigned Length, typename Type>
 inline CUDA_CALLABLE vec_t<Length, Type> max(vec_t<Length, Type> a, vec_t<Length, Type> b)
 {
     vec_t<Length, Type> ret;
     for (unsigned i = 0; i < Length; ++i) {
-        ret[i] = a[i] > b[i] ? a[i] : b[i];
+        ret[i] = max<Tag>(a[i], b[i]);
     }
     return ret;
 }
 
-template <unsigned Length, typename Type> inline CUDA_CALLABLE Type min(vec_t<Length, Type> v)
+// Vector reduction: selected by tag. The nan_propagate_t form preserves the
+// historical reduction shape (NaN at index 0 sticks; NaN at later indices is
+// silently dropped because `v[i] < ret` is false). The nan_as_missing_t form
+// folds with fmin per step so any non-NaN value wins.
+template <unsigned Length, typename Type>
+inline CUDA_CALLABLE Type min_reduce_impl(vec_t<Length, Type> v, nan_propagate_t)
 {
     Type ret = v[0];
     for (unsigned i = 1; i < Length; ++i) {
@@ -1248,7 +1256,18 @@ template <unsigned Length, typename Type> inline CUDA_CALLABLE Type min(vec_t<Le
     return ret;
 }
 
-template <unsigned Length, typename Type> inline CUDA_CALLABLE Type max(vec_t<Length, Type> v)
+template <unsigned Length, typename Type>
+inline CUDA_CALLABLE Type min_reduce_impl(vec_t<Length, Type> v, nan_as_missing_t)
+{
+    Type ret = v[0];
+    for (unsigned i = 1; i < Length; ++i) {
+        ret = min<nan_as_missing_t>(ret, v[i]);
+    }
+    return ret;
+}
+
+template <unsigned Length, typename Type>
+inline CUDA_CALLABLE Type max_reduce_impl(vec_t<Length, Type> v, nan_propagate_t)
 {
     Type ret = v[0];
     for (unsigned i = 1; i < Length; ++i) {
@@ -1256,6 +1275,28 @@ template <unsigned Length, typename Type> inline CUDA_CALLABLE Type max(vec_t<Le
             ret = v[i];
     }
     return ret;
+}
+
+template <unsigned Length, typename Type>
+inline CUDA_CALLABLE Type max_reduce_impl(vec_t<Length, Type> v, nan_as_missing_t)
+{
+    Type ret = v[0];
+    for (unsigned i = 1; i < Length; ++i) {
+        ret = max<nan_as_missing_t>(ret, v[i]);
+    }
+    return ret;
+}
+
+template <typename Tag = nan_propagate_t, unsigned Length, typename Type>
+inline CUDA_CALLABLE Type min(vec_t<Length, Type> v)
+{
+    return min_reduce_impl(v, Tag {});
+}
+
+template <typename Tag = nan_propagate_t, unsigned Length, typename Type>
+inline CUDA_CALLABLE Type max(vec_t<Length, Type> v)
+{
+    return max_reduce_impl(v, Tag {});
 }
 
 template <unsigned Length, typename Type> inline CUDA_CALLABLE unsigned argmin(vec_t<Length, Type> v)
@@ -1961,10 +2002,21 @@ inline CUDA_CALLABLE void adj_min(
 )
 {
     for (unsigned i = 0; i < Length; ++i) {
-        if (a[i] < b[i])
-            adj_a[i] += adj_ret[i];
-        else
-            adj_b[i] += adj_ret[i];
+        adj_min(a[i], b[i], adj_a[i], adj_b[i], adj_ret[i]);
+    }
+}
+
+template <typename Tag, unsigned Length, typename Type>
+inline CUDA_CALLABLE void adj_min(
+    const vec_t<Length, Type>& a,
+    const vec_t<Length, Type>& b,
+    vec_t<Length, Type>& adj_a,
+    vec_t<Length, Type>& adj_b,
+    const vec_t<Length, Type>& adj_ret
+)
+{
+    for (unsigned i = 0; i < Length; ++i) {
+        adj_min<Tag>(a[i], b[i], adj_a[i], adj_b[i], adj_ret[i]);
     }
 }
 
@@ -1978,10 +2030,21 @@ inline CUDA_CALLABLE void adj_max(
 )
 {
     for (unsigned i = 0; i < Length; ++i) {
-        if (a[i] > b[i])
-            adj_a[i] += adj_ret[i];
-        else
-            adj_b[i] += adj_ret[i];
+        adj_max(a[i], b[i], adj_a[i], adj_b[i], adj_ret[i]);
+    }
+}
+
+template <typename Tag, unsigned Length, typename Type>
+inline CUDA_CALLABLE void adj_max(
+    const vec_t<Length, Type>& a,
+    const vec_t<Length, Type>& b,
+    vec_t<Length, Type>& adj_a,
+    vec_t<Length, Type>& adj_b,
+    const vec_t<Length, Type>& adj_ret
+)
+{
+    for (unsigned i = 0; i < Length; ++i) {
+        adj_max<Tag>(a[i], b[i], adj_a[i], adj_b[i], adj_ret[i]);
     }
 }
 
@@ -1992,7 +2055,26 @@ inline CUDA_CALLABLE void adj_min(const vec_t<Length, Type>& v, vec_t<Length, Ty
     adj_v[i] += adj_ret;
 }
 
+template <typename Tag, unsigned Length, typename Type>
+inline CUDA_CALLABLE void adj_min(const vec_t<Length, Type>& v, vec_t<Length, Type>& adj_v, const Type& adj_ret)
+{
+    // For both nan_propagate_t and nan_as_missing_t, the gradient flows to
+    // whichever index the forward returned. argmin(v) follows the same
+    // comparison shape as the forward reduction, which is exact for
+    // nan_propagate_t and a reasonable fallback for nan_as_missing_t when
+    // there is at least one finite element.
+    unsigned i = argmin(v);
+    adj_v[i] += adj_ret;
+}
+
 template <unsigned Length, typename Type>
+inline CUDA_CALLABLE void adj_max(const vec_t<Length, Type>& v, vec_t<Length, Type>& adj_v, const Type& adj_ret)
+{
+    unsigned i = argmax(v);
+    adj_v[i] += adj_ret;
+}
+
+template <typename Tag, unsigned Length, typename Type>
 inline CUDA_CALLABLE void adj_max(const vec_t<Length, Type>& v, vec_t<Length, Type>& adj_v, const Type& adj_ret)
 {
     unsigned i = argmax(v);

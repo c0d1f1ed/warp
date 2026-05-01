@@ -79,10 +79,26 @@ def static_len_value_func(arg_types: Mapping[str, type], arg_values: Mapping[str
 # ---------------------------------
 # Scalar Math
 
+
+def _minmax_dispatch_func(input_types: Mapping[str, type], return_type: Any, args: Mapping[str, Var]):
+    """Codegen-time dispatch for wp.min / wp.max / wp.clamp.
+
+    Emits a C++ template tag (``wp::nan_propagate_t`` or ``wp::nan_as_missing_t``)
+    based on ``warp.config.standard_min_max``. The tag selects the corresponding
+    forward and adjoint specializations in ``warp/native/builtin.h``.
+    """
+    import warp.config as _cfg  # noqa: PLC0415  -- read at codegen time
+
+    tag = "wp::nan_as_missing_t" if _cfg.standard_min_max else "wp::nan_propagate_t"
+    return tuple(args.values()), (tag,)
+
+
 add_builtin(
     "min",
     input_types={"a": Scalar, "b": Scalar},
     value_func=sametypes_create_value_func(Scalar),
+    dispatch_func=_minmax_dispatch_func,
+    adjoint_takes_template_args=True,
     doc="""Compute the minimum value.""",
     group="Scalar Math",
 )
@@ -91,6 +107,8 @@ add_builtin(
     "max",
     input_types={"a": Scalar, "b": Scalar},
     value_func=sametypes_create_value_func(Scalar),
+    dispatch_func=_minmax_dispatch_func,
+    adjoint_takes_template_args=True,
     doc="""Compute the maximum value.""",
     group="Scalar Math",
 )
@@ -99,6 +117,8 @@ add_builtin(
     "clamp",
     input_types={"x": Scalar, "low": Scalar, "high": Scalar},
     value_func=sametypes_create_value_func(Scalar),
+    dispatch_func=_minmax_dispatch_func,
+    adjoint_takes_template_args=True,
     doc="Clamp the value of ``x`` to the range [low, high].",
     group="Scalar Math",
 )
@@ -621,6 +641,8 @@ add_builtin(
     input_types={"a": vector(length=Any, dtype=Scalar), "b": vector(length=Any, dtype=Scalar)},
     constraint=sametypes,
     value_func=sametypes_create_value_func(vector(length=Any, dtype=Scalar)),
+    dispatch_func=_minmax_dispatch_func,
+    adjoint_takes_template_args=True,
     doc="""Compute the minimum value.
 
     Returns:
@@ -632,6 +654,8 @@ add_builtin(
     input_types={"a": vector(length=Any, dtype=Scalar), "b": vector(length=Any, dtype=Scalar)},
     constraint=sametypes,
     value_func=sametypes_create_value_func(vector(length=Any, dtype=Scalar)),
+    dispatch_func=_minmax_dispatch_func,
+    adjoint_takes_template_args=True,
     doc="""Compute the maximum value.
 
     Returns:
@@ -643,6 +667,8 @@ add_builtin(
     "min",
     input_types={"a": vector(length=Any, dtype=Scalar)},
     value_func=scalar_sametypes_value_func,
+    dispatch_func=_minmax_dispatch_func,
+    adjoint_takes_template_args=True,
     doc="""Compute the minimum value.
 
     Returns:
@@ -653,6 +679,8 @@ add_builtin(
     "max",
     input_types={"a": vector(length=Any, dtype=Scalar)},
     value_func=scalar_sametypes_value_func,
+    dispatch_func=_minmax_dispatch_func,
+    adjoint_takes_template_args=True,
     doc="""Compute the maximum value.
 
     Returns:

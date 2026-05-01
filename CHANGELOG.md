@@ -90,6 +90,15 @@
   to `wp.Texture1D`, `wp.Texture2D`, or `wp.Texture3D` via the new `cuda_array=` parameter,
   or register an OpenGL texture for CUDA-OpenGL interop via the new `wp.GLTextureResource`
   class ([GH-1238](https://github.com/NVIDIA/warp/issues/1238)).
+- Add `warp.config.standard_min_max` (default `False`): opt in to making
+  `wp.min`, `wp.max`, and `wp.clamp` use C `fmin`/`fmax` semantics
+  (NaN-as-missing, symmetric in argument order). Off by default to preserve the
+  historical asymmetric `a<b?a:b` behavior
+  ([GH-1376](https://github.com/NVIDIA/warp/issues/1376)).
+- Add `wp.tile_scatter_masked()` for per-thread writes into a shared-memory tile, with
+  cooperative synchronization ([GH-1298](https://github.com/NVIDIA/warp/issues/1298)).
+- Add `wp.tile_query_valid()` for tile BVH and mesh AABB queries, providing a cleaner loop condition that avoids the
+  `wp.tile_max()` reduction overhead ([GH-1335](https://github.com/NVIDIA/warp/issues/1335)).
 - Add double-precision (`wp.float64`) support to `warp.fem`.
   Precision is selected via the geometry (e.g. `scalar_type=wp.float64` on grid constructors)
   and propagated automatically to function spaces, quadrature, fields, and integration kernels

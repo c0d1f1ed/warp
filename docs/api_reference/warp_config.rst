@@ -38,6 +38,7 @@ API
    print_launches
    ptx_target_arch
    quiet
+   standard_min_max
    track_memory
    use_precompiled_headers
    verbose

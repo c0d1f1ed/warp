@@ -581,6 +581,12 @@ template <typename T> CUDA_CALLABLE inline void adj_float64(T x, T& adj_x, float
 
 #define kEps 0.0f
 
+// Tag types for wp::min / wp::max / wp::clamp NaN handling. Selected by the
+// dispatch_func of the corresponding Warp builtins based on
+// `wp.config.standard_min_max`.
+struct nan_propagate_t { };  // current Warp behavior: a<b?a:b (asymmetric in NaN)
+struct nan_as_missing_t { };  // C fmin/fmax behavior (NaN-as-missing, symmetric)
+
 // basic ops for integer types
 #define DECLARE_INT_OPS(T) \
 inline CUDA_CALLABLE T mul(T a, T b) { return a*b; } \
@@ -588,9 +594,16 @@ inline CUDA_CALLABLE T div(T a, T b) { return a/b; } \
 inline CUDA_CALLABLE T add(T a, T b) { return a+b; } \
 inline CUDA_CALLABLE T sub(T a, T b) { return a-b; } \
 inline CUDA_CALLABLE T mod(T a, T b) { return a%b; } \
-inline CUDA_CALLABLE T min(T a, T b) { return a<b?a:b; } \
-inline CUDA_CALLABLE T max(T a, T b) { return a>b?a:b; } \
-inline CUDA_CALLABLE T clamp(T x, T a, T b) { return min(max(a, x), b); } \
+inline CUDA_CALLABLE T min_impl(T a, T b, nan_propagate_t) { return a<b?a:b; } \
+inline CUDA_CALLABLE T min_impl(T a, T b, nan_as_missing_t) { return a<b?a:b; } \
+inline CUDA_CALLABLE T max_impl(T a, T b, nan_propagate_t) { return a>b?a:b; } \
+inline CUDA_CALLABLE T max_impl(T a, T b, nan_as_missing_t) { return a>b?a:b; } \
+template <typename Tag = nan_propagate_t> \
+inline CUDA_CALLABLE T min(T a, T b) { return min_impl(a, b, Tag{}); } \
+template <typename Tag = nan_propagate_t> \
+inline CUDA_CALLABLE T max(T a, T b) { return max_impl(a, b, Tag{}); } \
+template <typename Tag = nan_propagate_t> \
+inline CUDA_CALLABLE T clamp(T x, T a, T b) { return min<Tag>(max<Tag>(a, x), b); } \
 inline CUDA_CALLABLE T floordiv(T a, T b) { return a/b; } \
 inline CUDA_CALLABLE T nonzero(T x) { return x == T(0) ? T(0) : T(1); } \
 inline CUDA_CALLABLE T sqrt(T x) { return 0; } \
@@ -605,10 +618,13 @@ inline CUDA_CALLABLE void adj_div(T a, T b, T ret, T& adj_a, T& adj_b, T adj_ret
 inline CUDA_CALLABLE void adj_add(T a, T b, T& adj_a, T& adj_b, T adj_ret) { } \
 inline CUDA_CALLABLE void adj_sub(T a, T b, T& adj_a, T& adj_b, T adj_ret) { } \
 inline CUDA_CALLABLE void adj_mod(T a, T b, T& adj_a, T& adj_b, T adj_ret) { } \
+template <typename Tag = nan_propagate_t> \
 inline CUDA_CALLABLE void adj_min(T a, T b, T& adj_a, T& adj_b, T adj_ret) { } \
+template <typename Tag = nan_propagate_t> \
 inline CUDA_CALLABLE void adj_max(T a, T b, T& adj_a, T& adj_b, T adj_ret) { } \
 inline CUDA_CALLABLE void adj_abs(T x, T adj_x, T& adj_ret) { } \
 inline CUDA_CALLABLE void adj_sign(T x, T adj_x, T& adj_ret) { } \
+template <typename Tag = nan_propagate_t> \
 inline CUDA_CALLABLE void adj_clamp(T x, T a, T b, T& adj_x, T& adj_a, T& adj_b, T adj_ret) { } \
 inline CUDA_CALLABLE void adj_floordiv(T a, T b, T& adj_a, T& adj_b, T adj_ret) { } \
 inline CUDA_CALLABLE void adj_step(T x, T& adj_x, T adj_ret) { } \
@@ -702,12 +718,21 @@ inline CUDA_CALLABLE void print(double f) { printf("%g\n", f); }
 inline CUDA_CALLABLE T mul(T a, T b) { return a*b; } \
 inline CUDA_CALLABLE T add(T a, T b) { return a+b; } \
 inline CUDA_CALLABLE T sub(T a, T b) { return a-b; } \
-inline CUDA_CALLABLE T min(T a, T b) { return a<b?a:b; } \
-inline CUDA_CALLABLE T max(T a, T b) { return a>b?a:b; } \
+inline CUDA_CALLABLE T min_impl(T a, T b, nan_propagate_t) { return a<b?a:b; } \
+inline CUDA_CALLABLE T min_impl(T a, T b, nan_as_missing_t) \
+    { return ::isnan(float(a)) ? b : (::isnan(float(b)) ? a : (a<b?a:b)); } \
+inline CUDA_CALLABLE T max_impl(T a, T b, nan_propagate_t) { return a>b?a:b; } \
+inline CUDA_CALLABLE T max_impl(T a, T b, nan_as_missing_t) \
+    { return ::isnan(float(a)) ? b : (::isnan(float(b)) ? a : (a>b?a:b)); } \
+template <typename Tag = nan_propagate_t> \
+inline CUDA_CALLABLE T min(T a, T b) { return min_impl(a, b, Tag{}); } \
+template <typename Tag = nan_propagate_t> \
+inline CUDA_CALLABLE T max(T a, T b) { return max_impl(a, b, Tag{}); } \
 inline CUDA_CALLABLE T sign(T x) { return x < T(0) ? -1 : 1; } \
 inline CUDA_CALLABLE T step(T x) { return x < T(0) ? T(1) : T(0); }\
 inline CUDA_CALLABLE T nonzero(T x) { return x == T(0) ? T(0) : T(1); }\
-inline CUDA_CALLABLE T clamp(T x, T a, T b) { return min(max(a, x), b); }\
+template <typename Tag = nan_propagate_t> \
+inline CUDA_CALLABLE T clamp(T x, T a, T b) { return min<Tag>(max<Tag>(a, x), b); }\
 inline CUDA_CALLABLE void adj_abs(T x, T& adj_x, T adj_ret) \
 {\
     if (x < T(0))\
@@ -718,20 +743,38 @@ inline CUDA_CALLABLE void adj_abs(T x, T& adj_x, T adj_ret) \
 inline CUDA_CALLABLE void adj_mul(T a, T b, T& adj_a, T& adj_b, T adj_ret) { adj_a += b*adj_ret; adj_b += a*adj_ret; } \
 inline CUDA_CALLABLE void adj_add(T a, T b, T& adj_a, T& adj_b, T adj_ret) { adj_a += adj_ret; adj_b += adj_ret; } \
 inline CUDA_CALLABLE void adj_sub(T a, T b, T& adj_a, T& adj_b, T adj_ret) { adj_a += adj_ret; adj_b -= adj_ret; } \
+inline CUDA_CALLABLE void adj_min_impl(T a, T b, T& adj_a, T& adj_b, T adj_ret, nan_propagate_t) \
+{ \
+    if (a < b) adj_a += adj_ret; \
+    else       adj_b += adj_ret; \
+} \
+inline CUDA_CALLABLE void adj_min_impl(T a, T b, T& adj_a, T& adj_b, T adj_ret, nan_as_missing_t) \
+{ \
+    /* Forward returns: NaN if both NaN; the non-NaN if exactly one is NaN; */ \
+    /* the smaller otherwise. Route gradient to the operand the forward picked. */ \
+    if (::isnan(float(a)))      adj_b += adj_ret; \
+    else if (::isnan(float(b))) adj_a += adj_ret; \
+    else if (a < b)             adj_a += adj_ret; \
+    else                        adj_b += adj_ret; \
+} \
+template <typename Tag = nan_propagate_t> \
 inline CUDA_CALLABLE void adj_min(T a, T b, T& adj_a, T& adj_b, T adj_ret) \
+{ adj_min_impl(a, b, adj_a, adj_b, adj_ret, Tag{}); } \
+inline CUDA_CALLABLE void adj_max_impl(T a, T b, T& adj_a, T& adj_b, T adj_ret, nan_propagate_t) \
 { \
-    if (a < b) \
-        adj_a += adj_ret; \
-    else \
-        adj_b += adj_ret; \
+    if (a > b) adj_a += adj_ret; \
+    else       adj_b += adj_ret; \
 } \
+inline CUDA_CALLABLE void adj_max_impl(T a, T b, T& adj_a, T& adj_b, T adj_ret, nan_as_missing_t) \
+{ \
+    if (::isnan(float(a)))      adj_b += adj_ret; \
+    else if (::isnan(float(b))) adj_a += adj_ret; \
+    else if (a > b)             adj_a += adj_ret; \
+    else                        adj_b += adj_ret; \
+} \
+template <typename Tag = nan_propagate_t> \
 inline CUDA_CALLABLE void adj_max(T a, T b, T& adj_a, T& adj_b, T adj_ret) \
-{ \
-    if (a > b) \
-        adj_a += adj_ret; \
-    else \
-        adj_b += adj_ret; \
-} \
+{ adj_max_impl(a, b, adj_a, adj_b, adj_ret, Tag{}); } \
 inline CUDA_CALLABLE void adj_floordiv(T a, T b, T& adj_a, T& adj_b, T adj_ret) { } \
 inline CUDA_CALLABLE void adj_mod(T a, T b, T& adj_a, T& adj_b, T adj_ret){ adj_a += adj_ret; }\
 inline CUDA_CALLABLE void adj_sign(T x, T adj_x, T& adj_ret) { }\
@@ -749,15 +792,29 @@ inline CUDA_CALLABLE void adj_copysign(T x, T y, T& adj_x, T& adj_y, T adj_ret) 
 } \
 inline CUDA_CALLABLE void adj_step(T x, T& adj_x, T adj_ret) { }\
 inline CUDA_CALLABLE void adj_nonzero(T x, T& adj_x, T adj_ret) { }\
-inline CUDA_CALLABLE void adj_clamp(T x, T a, T b, T& adj_x, T& adj_a, T& adj_b, T adj_ret)\
+inline CUDA_CALLABLE void adj_clamp_impl(T x, T a, T b, T& adj_x, T& adj_a, T& adj_b, T adj_ret, nan_propagate_t)\
 {\
-    if (x < a)\
-        adj_a += adj_ret;\
-    else if (x > b)\
-        adj_b += adj_ret;\
-    else\
-        adj_x += adj_ret;\
+    if (x < a)      adj_a += adj_ret;\
+    else if (x > b) adj_b += adj_ret;\
+    else            adj_x += adj_ret;\
 }\
+inline CUDA_CALLABLE void adj_clamp_impl(T x, T a, T b, T& adj_x, T& adj_a, T& adj_b, T adj_ret, nan_as_missing_t)\
+{\
+    /* Forward expands to min<.>(max<.>(a, x), b). With NaN-as-missing:    */\
+    /* - if x is NaN: max returns a, then min(a, b) picks the smaller bound */\
+    /* - if a is NaN: max returns x, then min(x, b) -> standard clamp on (x,b) */\
+    /* - if b is NaN: min returns max(a, x) -> standard clamp on (x,a)        */\
+    /* For unambiguous (no-NaN) inputs, behavior matches nan_propagate_t.     */\
+    if (::isnan(float(x)))      { /* gradient on a NaN input is 0 */ }\
+    else if (::isnan(float(a))) { if (x > b) adj_b += adj_ret; else adj_x += adj_ret; }\
+    else if (::isnan(float(b))) { if (x < a) adj_a += adj_ret; else adj_x += adj_ret; }\
+    else if (x < a)             adj_a += adj_ret;\
+    else if (x > b)             adj_b += adj_ret;\
+    else                        adj_x += adj_ret;\
+}\
+template <typename Tag = nan_propagate_t> \
+inline CUDA_CALLABLE void adj_clamp(T x, T a, T b, T& adj_x, T& adj_a, T& adj_b, T adj_ret)\
+{ adj_clamp_impl(x, a, b, adj_x, adj_a, adj_b, adj_ret, Tag{}); }\
 inline CUDA_CALLABLE T div(T a, T b)\
 {\
     DO_IF_FPCHECK(\
