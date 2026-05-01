@@ -1217,26 +1217,27 @@ template <unsigned Length, typename Type> inline bool CUDA_CALLABLE isinf(vec_t<
     return false;
 }
 
-// Element-wise vector min/max. Tag dispatches to the scalar tagged
-// implementations in builtin.h. Default Tag = nan_propagate_t preserves the
-// historical `a<b?a:b` behavior for direct callers like bvh.cu and exports.h.
+// Element-wise vector min/max. The NanBehavior parameter forwards to the
+// scalar min<NanBehavior>/max<NanBehavior> overloads in builtin.h. The
+// default nan_propagate_t preserves the historical `a<b?a:b` behavior for
+// direct callers like bvh.cu and exports.h.
 // These two functions seem to compile very slowly
-template <typename Tag = nan_propagate_t, unsigned Length, typename Type>
+template <typename NanBehavior = nan_propagate_t, unsigned Length, typename Type>
 inline CUDA_CALLABLE vec_t<Length, Type> min(vec_t<Length, Type> a, vec_t<Length, Type> b)
 {
     vec_t<Length, Type> ret;
     for (unsigned i = 0; i < Length; ++i) {
-        ret[i] = min<Tag>(a[i], b[i]);
+        ret[i] = min<NanBehavior>(a[i], b[i]);
     }
     return ret;
 }
 
-template <typename Tag = nan_propagate_t, unsigned Length, typename Type>
+template <typename NanBehavior = nan_propagate_t, unsigned Length, typename Type>
 inline CUDA_CALLABLE vec_t<Length, Type> max(vec_t<Length, Type> a, vec_t<Length, Type> b)
 {
     vec_t<Length, Type> ret;
     for (unsigned i = 0; i < Length; ++i) {
-        ret[i] = max<Tag>(a[i], b[i]);
+        ret[i] = max<NanBehavior>(a[i], b[i]);
     }
     return ret;
 }
@@ -1287,16 +1288,16 @@ inline CUDA_CALLABLE Type max_reduce_impl(vec_t<Length, Type> v, nan_as_missing_
     return ret;
 }
 
-template <typename Tag = nan_propagate_t, unsigned Length, typename Type>
+template <typename NanBehavior = nan_propagate_t, unsigned Length, typename Type>
 inline CUDA_CALLABLE Type min(vec_t<Length, Type> v)
 {
-    return min_reduce_impl(v, Tag {});
+    return min_reduce_impl(v, NanBehavior {});
 }
 
-template <typename Tag = nan_propagate_t, unsigned Length, typename Type>
+template <typename NanBehavior = nan_propagate_t, unsigned Length, typename Type>
 inline CUDA_CALLABLE Type max(vec_t<Length, Type> v)
 {
-    return max_reduce_impl(v, Tag {});
+    return max_reduce_impl(v, NanBehavior {});
 }
 
 template <unsigned Length, typename Type> inline CUDA_CALLABLE unsigned argmin(vec_t<Length, Type> v)
@@ -2006,7 +2007,7 @@ inline CUDA_CALLABLE void adj_min(
     }
 }
 
-template <typename Tag, unsigned Length, typename Type>
+template <typename NanBehavior, unsigned Length, typename Type>
 inline CUDA_CALLABLE void adj_min(
     const vec_t<Length, Type>& a,
     const vec_t<Length, Type>& b,
@@ -2016,7 +2017,7 @@ inline CUDA_CALLABLE void adj_min(
 )
 {
     for (unsigned i = 0; i < Length; ++i) {
-        adj_min<Tag>(a[i], b[i], adj_a[i], adj_b[i], adj_ret[i]);
+        adj_min<NanBehavior>(a[i], b[i], adj_a[i], adj_b[i], adj_ret[i]);
     }
 }
 
@@ -2034,7 +2035,7 @@ inline CUDA_CALLABLE void adj_max(
     }
 }
 
-template <typename Tag, unsigned Length, typename Type>
+template <typename NanBehavior, unsigned Length, typename Type>
 inline CUDA_CALLABLE void adj_max(
     const vec_t<Length, Type>& a,
     const vec_t<Length, Type>& b,
@@ -2044,7 +2045,7 @@ inline CUDA_CALLABLE void adj_max(
 )
 {
     for (unsigned i = 0; i < Length; ++i) {
-        adj_max<Tag>(a[i], b[i], adj_a[i], adj_b[i], adj_ret[i]);
+        adj_max<NanBehavior>(a[i], b[i], adj_a[i], adj_b[i], adj_ret[i]);
     }
 }
 
@@ -2055,7 +2056,7 @@ inline CUDA_CALLABLE void adj_min(const vec_t<Length, Type>& v, vec_t<Length, Ty
     adj_v[i] += adj_ret;
 }
 
-template <typename Tag, unsigned Length, typename Type>
+template <typename NanBehavior, unsigned Length, typename Type>
 inline CUDA_CALLABLE void adj_min(const vec_t<Length, Type>& v, vec_t<Length, Type>& adj_v, const Type& adj_ret)
 {
     // For both nan_propagate_t and nan_as_missing_t, the gradient flows to
@@ -2074,7 +2075,7 @@ inline CUDA_CALLABLE void adj_max(const vec_t<Length, Type>& v, vec_t<Length, Ty
     adj_v[i] += adj_ret;
 }
 
-template <typename Tag, unsigned Length, typename Type>
+template <typename NanBehavior, unsigned Length, typename Type>
 inline CUDA_CALLABLE void adj_max(const vec_t<Length, Type>& v, vec_t<Length, Type>& adj_v, const Type& adj_ret)
 {
     unsigned i = argmax(v);
@@ -2119,23 +2120,23 @@ inline CUDA_CALLABLE vec_t<Length, Type> atomic_add(vec_t<Length, Type>* addr, v
     return ret;
 }
 
-template <unsigned Length, typename Type>
+template <typename NanBehavior = nan_propagate_t, unsigned Length, typename Type>
 inline CUDA_CALLABLE vec_t<Length, Type> atomic_min(vec_t<Length, Type>* addr, vec_t<Length, Type> value)
 {
     vec_t<Length, Type> ret;
     for (unsigned i = 0; i < Length; ++i) {
-        ret[i] = atomic_min(&(addr->c[i]), value[i]);
+        ret[i] = atomic_min<NanBehavior>(&(addr->c[i]), value[i]);
     }
 
     return ret;
 }
 
-template <unsigned Length, typename Type>
+template <typename NanBehavior = nan_propagate_t, unsigned Length, typename Type>
 inline CUDA_CALLABLE vec_t<Length, Type> atomic_max(vec_t<Length, Type>* addr, vec_t<Length, Type> value)
 {
     vec_t<Length, Type> ret;
     for (unsigned i = 0; i < Length; ++i) {
-        ret[i] = atomic_max(&(addr->c[i]), value[i]);
+        ret[i] = atomic_max<NanBehavior>(&(addr->c[i]), value[i]);
     }
 
     return ret;

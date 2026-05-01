@@ -9976,6 +9976,23 @@ def atomic_op_dispatch_func(input_types: Mapping[str, type], return_type: Any, a
     return (func_args, template_args)
 
 
+def atomic_minmax_dispatch_func(input_types: Mapping[str, type], return_type: Any, args: Mapping[str, Var]):
+    # Same write-tracking as atomic_op_dispatch_func, but also emits a NaN-handling
+    # tag template arg so atomic_min / atomic_max stay consistent with the non-atomic
+    # min / max under wp.config.standard_min_max.
+    if warp._src.codegen.options.get("verify_autograd_array_access", False):
+        arr = args["arr"]
+        arr.mark_write()
+
+    import warp.config as _cfg  # noqa: PLC0415  -- read at codegen time
+
+    func_args = tuple(args.values())
+    tag = "wp::nan_as_missing_t" if _cfg.standard_min_max else "wp::nan_propagate_t"
+    template_args = (tag,)
+
+    return (func_args, template_args)
+
+
 for array_type in array_types:
     # don't list fixed or indexed array operations explicitly in docs
     hidden = array_type in (indexedarray, fixedarray)
@@ -10092,7 +10109,7 @@ for array_type in array_types:
         input_types={"arr": array_type(dtype=Any), "i": Int, "value": Any},
         constraint=atomic_op_constraint,
         value_func=create_atomic_op_value_func("min"),
-        dispatch_func=atomic_op_dispatch_func,
+        dispatch_func=atomic_minmax_dispatch_func,
         doc="""Compute the minimum of ``value`` and ``arr[i]``, atomically update the array, and return the old value.
 
         The operation is only atomic on a per-component basis for vectors and matrices.""",
@@ -10105,7 +10122,7 @@ for array_type in array_types:
         input_types={"arr": array_type(dtype=Any), "i": Int, "j": Int, "value": Any},
         constraint=atomic_op_constraint,
         value_func=create_atomic_op_value_func("min"),
-        dispatch_func=atomic_op_dispatch_func,
+        dispatch_func=atomic_minmax_dispatch_func,
         doc="""Compute the minimum of ``value`` and ``arr[i,j]``, atomically update the array, and return the old value.
 
         The operation is only atomic on a per-component basis for vectors and matrices.""",
@@ -10118,7 +10135,7 @@ for array_type in array_types:
         input_types={"arr": array_type(dtype=Any), "i": Int, "j": Int, "k": Int, "value": Any},
         constraint=atomic_op_constraint,
         value_func=create_atomic_op_value_func("min"),
-        dispatch_func=atomic_op_dispatch_func,
+        dispatch_func=atomic_minmax_dispatch_func,
         doc="""Compute the minimum of ``value`` and ``arr[i,j,k]``, atomically update the array, and return the old value.
 
         The operation is only atomic on a per-component basis for vectors and matrices.""",
@@ -10131,7 +10148,7 @@ for array_type in array_types:
         input_types={"arr": array_type(dtype=Any), "i": Int, "j": Int, "k": Int, "l": Int, "value": Any},
         constraint=atomic_op_constraint,
         value_func=create_atomic_op_value_func("min"),
-        dispatch_func=atomic_op_dispatch_func,
+        dispatch_func=atomic_minmax_dispatch_func,
         doc="""Compute the minimum of ``value`` and ``arr[i,j,k,l]``, atomically update the array, and return the old value.
 
         The operation is only atomic on a per-component basis for vectors and matrices.""",
@@ -10145,7 +10162,7 @@ for array_type in array_types:
         input_types={"arr": array_type(dtype=Any), "i": Int, "value": Any},
         constraint=atomic_op_constraint,
         value_func=create_atomic_op_value_func("max"),
-        dispatch_func=atomic_op_dispatch_func,
+        dispatch_func=atomic_minmax_dispatch_func,
         doc="""Compute the maximum of ``value`` and ``arr[i]``, atomically update the array, and return the old value.
 
         The operation is only atomic on a per-component basis for vectors and matrices.""",
@@ -10158,7 +10175,7 @@ for array_type in array_types:
         input_types={"arr": array_type(dtype=Any), "i": Int, "j": Int, "value": Any},
         constraint=atomic_op_constraint,
         value_func=create_atomic_op_value_func("max"),
-        dispatch_func=atomic_op_dispatch_func,
+        dispatch_func=atomic_minmax_dispatch_func,
         doc="""Compute the maximum of ``value`` and ``arr[i,j]``, atomically update the array, and return the old value.
 
         The operation is only atomic on a per-component basis for vectors and matrices.""",
@@ -10171,7 +10188,7 @@ for array_type in array_types:
         input_types={"arr": array_type(dtype=Any), "i": Int, "j": Int, "k": Int, "value": Any},
         constraint=atomic_op_constraint,
         value_func=create_atomic_op_value_func("max"),
-        dispatch_func=atomic_op_dispatch_func,
+        dispatch_func=atomic_minmax_dispatch_func,
         doc="""Compute the maximum of ``value`` and ``arr[i,j,k]``, atomically update the array, and return the old value.
 
         The operation is only atomic on a per-component basis for vectors and matrices.""",
@@ -10184,7 +10201,7 @@ for array_type in array_types:
         input_types={"arr": array_type(dtype=Any), "i": Int, "j": Int, "k": Int, "l": Int, "value": Any},
         constraint=atomic_op_constraint,
         value_func=create_atomic_op_value_func("max"),
-        dispatch_func=atomic_op_dispatch_func,
+        dispatch_func=atomic_minmax_dispatch_func,
         doc="""Compute the maximum of ``value`` and ``arr[i,j,k,l]``, atomically update the array, and return the old value.
 
         The operation is only atomic on a per-component basis for vectors and matrices.""",

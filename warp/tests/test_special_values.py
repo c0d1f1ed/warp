@@ -555,6 +555,76 @@ def test_minmax_standard_vec(test, device, dtype, register_kernels=False):
         assert_float_eq(test, actual_red_mx[i], expected_red_mx[i], f"wp.max(vec3)[row {i}] [standard]")
 
 
+def test_atomic_minmax_standard(test, device, dtype, register_kernels=False):
+    # wp.atomic_min / wp.atomic_max are intended to behave like their non-atomic
+    # counterparts under the same value of wp.config.standard_min_max. With the
+    # flag on, NaN inputs no longer no-op (the historical pre-loop guard is
+    # dropped); a NaN already in the array is overwritten by a finite value,
+    # and a NaN value leaves the array unchanged when the array holds a finite
+    # number. atomic_min / atomic_max do not support float16, so this test runs
+    # on float32 / float64 only.
+
+    def kern(
+        a: wp.array(dtype=dtype),
+        b: wp.array(dtype=dtype),
+        in_min: wp.array(dtype=dtype),
+        in_max: wp.array(dtype=dtype),
+        ret_min: wp.array(dtype=dtype),
+        ret_max: wp.array(dtype=dtype),
+    ):
+        i = wp.tid()
+        # a[i] is the array slot, b[i] is the value passed to atomic_min/max.
+        # Copy a into in_min/in_max so each test row has its own slot.
+        in_min[i] = a[i]
+        in_max[i] = a[i]
+        ret_min[i] = wp.atomic_min(in_min, i, b[i])
+        ret_max[i] = wp.atomic_max(in_max, i, b[i])
+
+    kernel = getkernel(kern, suffix="atomic_standard_" + dtype.__name__)
+
+    if register_kernels:
+        return
+
+    nan = float("nan")
+    # Each row pairs (a, b): a is the initial array slot, b is the value passed
+    # to atomic_min/atomic_max. Under standard_min_max=True, the post-call slot
+    # should equal np.fmin(a, b) / np.fmax(a, b).
+    rows_a = [-1.0, nan, nan, -1.0, nan, 2.0]
+    rows_b = [nan, -1.0, nan, 2.0, 2.0, nan]
+    expected_min = [float(np.fmin(np.float64(a), np.float64(b))) for a, b in zip(rows_a, rows_b, strict=True)]
+    expected_max = [float(np.fmax(np.float64(a), np.float64(b))) for a, b in zip(rows_a, rows_b, strict=True)]
+
+    n = len(rows_a)
+    saved = wp.config.standard_min_max
+    wp.config.standard_min_max = True
+    kernel.module.mark_modified()
+    try:
+        a = wp.array(rows_a, dtype=dtype, device=device)
+        b = wp.array(rows_b, dtype=dtype, device=device)
+        in_min = wp.empty(n, dtype=dtype, device=device)
+        in_max = wp.empty(n, dtype=dtype, device=device)
+        ret_min = wp.empty(n, dtype=dtype, device=device)
+        ret_max = wp.empty(n, dtype=dtype, device=device)
+        wp.launch(kernel, dim=n, inputs=[a, b], outputs=[in_min, in_max, ret_min, ret_max], device=device)
+        # Post-call array slot is what atomic_min/max wrote.
+        actual_post_min = in_min.to("cpu").list()
+        actual_post_max = in_max.to("cpu").list()
+        # Returned value is the *old* slot (= rows_a[i]).
+        actual_ret_min = ret_min.to("cpu").list()
+        actual_ret_max = ret_max.to("cpu").list()
+    finally:
+        wp.config.standard_min_max = saved
+        kernel.module.mark_modified()
+
+    for i in range(n):
+        # Final slot should match non-atomic min<nan_as_missing>(a, b).
+        assert_float_eq(test, actual_post_min[i], expected_min[i], f"atomic_min slot[{i}] [standard]")
+        assert_float_eq(test, actual_post_max[i], expected_max[i], f"atomic_max slot[{i}] [standard]")
+        # Returned value must be the prior slot value (a[i]).
+        assert_float_eq(test, actual_ret_min[i], rows_a[i], f"atomic_min ret[{i}] [standard]")
+        assert_float_eq(test, actual_ret_max[i], rows_a[i], f"atomic_max ret[{i}] [standard]")
+
+
 def test_is_special_quat(test, device, dtype, register_kernels=False):
     quat_type = wp.types.quaternion(dtype)
 
@@ -778,6 +848,16 @@ for dtype in [wp.float16, wp.float32, wp.float64]:
         TestSpecialValues,
         f"test_copysign_adjoint_{dtype.__name__}",
         test_copysign_adjoint,
+        devices=devices,
+        dtype=dtype,
+    )
+
+# atomic_min / atomic_max do not support float16 -- skip it here.
+for dtype in [wp.float32, wp.float64]:
+    add_function_test_register_kernel(
+        TestSpecialValues,
+        f"test_atomic_minmax_standard_{dtype.__name__}",
+        test_atomic_minmax_standard,
         devices=devices,
         dtype=dtype,
     )

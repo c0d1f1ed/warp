@@ -1066,44 +1066,46 @@ inline CUDA_CALLABLE T atomic_sub(const A<T>& buf, int i, int j, int k, int l, T
     return atomic_add(&index(buf, i, j, k, l), -value);
 }
 
-template <template <typename> class A, typename T> inline CUDA_CALLABLE T atomic_min(const A<T>& buf, int i, T value)
+template <typename NanBehavior = nan_propagate_t, template <typename> class A, typename T>
+inline CUDA_CALLABLE T atomic_min(const A<T>& buf, int i, T value)
 {
-    return atomic_min(&index(buf, i), value);
+    return atomic_min<NanBehavior>(&index(buf, i), value);
 }
-template <template <typename> class A, typename T>
+template <typename NanBehavior = nan_propagate_t, template <typename> class A, typename T>
 inline CUDA_CALLABLE T atomic_min(const A<T>& buf, int i, int j, T value)
 {
-    return atomic_min(&index(buf, i, j), value);
+    return atomic_min<NanBehavior>(&index(buf, i, j), value);
 }
-template <template <typename> class A, typename T>
+template <typename NanBehavior = nan_propagate_t, template <typename> class A, typename T>
 inline CUDA_CALLABLE T atomic_min(const A<T>& buf, int i, int j, int k, T value)
 {
-    return atomic_min(&index(buf, i, j, k), value);
+    return atomic_min<NanBehavior>(&index(buf, i, j, k), value);
 }
-template <template <typename> class A, typename T>
+template <typename NanBehavior = nan_propagate_t, template <typename> class A, typename T>
 inline CUDA_CALLABLE T atomic_min(const A<T>& buf, int i, int j, int k, int l, T value)
 {
-    return atomic_min(&index(buf, i, j, k, l), value);
+    return atomic_min<NanBehavior>(&index(buf, i, j, k, l), value);
 }
 
-template <template <typename> class A, typename T> inline CUDA_CALLABLE T atomic_max(const A<T>& buf, int i, T value)
+template <typename NanBehavior = nan_propagate_t, template <typename> class A, typename T>
+inline CUDA_CALLABLE T atomic_max(const A<T>& buf, int i, T value)
 {
-    return atomic_max(&index(buf, i), value);
+    return atomic_max<NanBehavior>(&index(buf, i), value);
 }
-template <template <typename> class A, typename T>
+template <typename NanBehavior = nan_propagate_t, template <typename> class A, typename T>
 inline CUDA_CALLABLE T atomic_max(const A<T>& buf, int i, int j, T value)
 {
-    return atomic_max(&index(buf, i, j), value);
+    return atomic_max<NanBehavior>(&index(buf, i, j), value);
 }
-template <template <typename> class A, typename T>
+template <typename NanBehavior = nan_propagate_t, template <typename> class A, typename T>
 inline CUDA_CALLABLE T atomic_max(const A<T>& buf, int i, int j, int k, T value)
 {
-    return atomic_max(&index(buf, i, j, k), value);
+    return atomic_max<NanBehavior>(&index(buf, i, j, k), value);
 }
-template <template <typename> class A, typename T>
+template <typename NanBehavior = nan_propagate_t, template <typename> class A, typename T>
 inline CUDA_CALLABLE T atomic_max(const A<T>& buf, int i, int j, int k, int l, T value)
 {
-    return atomic_max(&index(buf, i, j, k, l), value);
+    return atomic_max<NanBehavior>(&index(buf, i, j, k, l), value);
 }
 
 template <template <typename> class A, typename T>

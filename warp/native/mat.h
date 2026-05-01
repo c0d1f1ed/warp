@@ -459,26 +459,26 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> atomic_xor(mat_t<Rows, Cols, Type>*
     return m;
 }
 
-template <unsigned Rows, unsigned Cols, typename Type>
+template <typename NanBehavior = nan_propagate_t, unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE mat_t<Rows, Cols, Type> atomic_min(mat_t<Rows, Cols, Type>* addr, mat_t<Rows, Cols, Type> value)
 {
     mat_t<Rows, Cols, Type> m;
 
     for (unsigned i = 0; i < Rows; ++i)
         for (unsigned j = 0; j < Cols; ++j)
-            m.data[i][j] = atomic_min(&addr->data[i][j], value.data[i][j]);
+            m.data[i][j] = atomic_min<NanBehavior>(&addr->data[i][j], value.data[i][j]);
 
     return m;
 }
 
-template <unsigned Rows, unsigned Cols, typename Type>
+template <typename NanBehavior = nan_propagate_t, unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE mat_t<Rows, Cols, Type> atomic_max(mat_t<Rows, Cols, Type>* addr, mat_t<Rows, Cols, Type> value)
 {
     mat_t<Rows, Cols, Type> m;
 
     for (unsigned i = 0; i < Rows; ++i)
         for (unsigned j = 0; j < Cols; ++j)
-            m.data[i][j] = atomic_max(&addr->data[i][j], value.data[i][j]);
+            m.data[i][j] = atomic_max<NanBehavior>(&addr->data[i][j], value.data[i][j]);
 
     return m;
 }
