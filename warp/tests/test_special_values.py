@@ -555,6 +555,78 @@ def test_minmax_standard_vec(test, device, dtype, register_kernels=False):
         assert_float_eq(test, actual_red_mx[i], expected_red_mx[i], f"wp.max(vec3)[row {i}] [standard]")
 
 
+def test_minmax_reduction_adjoint_standard(test, device, dtype, register_kernels=False):
+    # Under standard_min_max=True, the reduction adjoint adj_min<NB>(vec)/
+    # adj_max<NB>(vec) must route the gradient to the index the forward picked.
+    # Critically, when v[0] is NaN, the forward fmin reduction skips NaN and
+    # picks the first non-NaN extremum; the adjoint must do the same. The
+    # historical argmin/argmax used raw `<`/`>` and would route the gradient
+    # to v[0] (the NaN slot) in this case.
+    vec3_t = wp.types.vector(3, dtype)
+
+    def reduce_kern(
+        v: wp.array(dtype=vec3_t),
+        out_min: wp.array(dtype=dtype),
+        out_max: wp.array(dtype=dtype),
+    ):
+        i = wp.tid()
+        out_min[i] = wp.min(v[i])
+        out_max[i] = wp.max(v[i])
+
+    kernel = getkernel(reduce_kern, suffix="reduce_adj_standard_" + dtype.__name__)
+
+    if register_kernels:
+        return
+
+    nan = float("nan")
+    # Crafted to expose the bug: under nan_propagate_t the forward returns NaN
+    # and the gradient correctly routes to slot 0; under nan_as_missing_t the
+    # forward returns -1 (slot 2 for min) / 2 (slot 1 for max) and the
+    # gradient must route there, NOT to slot 0.
+    rows = [
+        [nan, 2.0, -1.0],
+    ]
+    expected_grad_min = [
+        [0.0, 0.0, 1.0],  # min picks v[2]=-1
+    ]
+    expected_grad_max = [
+        [0.0, 1.0, 0.0],  # max picks v[1]=2
+    ]
+
+    saved = wp.config.standard_min_max
+    wp.config.standard_min_max = True
+    kernel.module.mark_modified()
+    try:
+        n = len(rows)
+        v = wp.array(rows, dtype=vec3_t, device=device, requires_grad=True)
+        out_min = wp.zeros(n, dtype=dtype, device=device, requires_grad=True)
+        out_max = wp.zeros(n, dtype=dtype, device=device, requires_grad=True)
+
+        tape = wp.Tape()
+        with tape:
+            wp.launch(kernel, dim=n, inputs=[v], outputs=[out_min, out_max], device=device)
+        # Use a sum-of-outputs loss so each row contributes adj_ret = 1 to its
+        # own min and max output.
+        out_min.grad.fill_(dtype(1.0))
+        out_max.grad.fill_(dtype(1.0))
+        tape.backward()
+        actual_grad = v.grad.numpy()
+    finally:
+        wp.config.standard_min_max = saved
+        kernel.module.mark_modified()
+
+    # Combined expected gradient: min and max contribute independently.
+    for i in range(len(rows)):
+        for j in range(3):
+            expected = expected_grad_min[i][j] + expected_grad_max[i][j]
+            assert_float_eq(
+                test,
+                actual_grad[i][j],
+                expected,
+                f"adj_min+adj_max v[{i}][{j}] [standard]",
+            )
+
+
 def test_atomic_minmax_standard(test, device, dtype, register_kernels=False):
     # wp.atomic_min / wp.atomic_max are intended to behave like their non-atomic
     # counterparts under the same value of wp.config.standard_min_max. With the
@@ -834,6 +906,13 @@ for dtype in [wp.float16, wp.float32, wp.float64]:
         TestSpecialValues,
         f"test_minmax_standard_vec_{dtype.__name__}",
         test_minmax_standard_vec,
+        devices=devices,
+        dtype=dtype,
+    )
+    add_function_test_register_kernel(
+        TestSpecialValues,
+        f"test_minmax_reduction_adjoint_standard_{dtype.__name__}",
+        test_minmax_reduction_adjoint_standard,
         devices=devices,
         dtype=dtype,
     )

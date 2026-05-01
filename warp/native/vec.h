@@ -1320,6 +1320,58 @@ template <unsigned Length, typename Type> inline CUDA_CALLABLE unsigned argmax(v
     return ret;
 }
 
+// NaN-aware argmin/argmax used by the reduction adjoints under
+// nan_as_missing_t: skip NaN candidates and pick the first non-NaN extremum,
+// matching the forward reduction's choice. When every element is NaN the
+// forward returns v[0], so we route gradient there too. For integer Type the
+// `::isnan(float(...))` check is always false, so the helpers degrade to the
+// raw-comparison argmin/argmax above.
+template <unsigned Length, typename Type>
+inline CUDA_CALLABLE unsigned _argmin_impl(const vec_t<Length, Type>& v, nan_propagate_t)
+{
+    return argmin(v);
+}
+
+template <unsigned Length, typename Type>
+inline CUDA_CALLABLE unsigned _argmin_impl(const vec_t<Length, Type>& v, nan_as_missing_t)
+{
+    unsigned ret = 0;
+    while (ret < Length && ::isnan(float(v[ret])))
+        ++ret;
+    if (ret == Length)
+        return 0;
+    for (unsigned i = ret + 1; i < Length; ++i) {
+        if (::isnan(float(v[i])))
+            continue;
+        if (v[i] < v[ret])
+            ret = i;
+    }
+    return ret;
+}
+
+template <unsigned Length, typename Type>
+inline CUDA_CALLABLE unsigned _argmax_impl(const vec_t<Length, Type>& v, nan_propagate_t)
+{
+    return argmax(v);
+}
+
+template <unsigned Length, typename Type>
+inline CUDA_CALLABLE unsigned _argmax_impl(const vec_t<Length, Type>& v, nan_as_missing_t)
+{
+    unsigned ret = 0;
+    while (ret < Length && ::isnan(float(v[ret])))
+        ++ret;
+    if (ret == Length)
+        return 0;
+    for (unsigned i = ret + 1; i < Length; ++i) {
+        if (::isnan(float(v[i])))
+            continue;
+        if (v[i] > v[ret])
+            ret = i;
+    }
+    return ret;
+}
+
 template <unsigned Length, typename Type> inline CUDA_CALLABLE vec_t<Length, Type> abs(vec_t<Length, Type> v)
 {
     vec_t<Length, Type> ret;
@@ -2059,12 +2111,9 @@ inline CUDA_CALLABLE void adj_min(const vec_t<Length, Type>& v, vec_t<Length, Ty
 template <typename NanBehavior, unsigned Length, typename Type>
 inline CUDA_CALLABLE void adj_min(const vec_t<Length, Type>& v, vec_t<Length, Type>& adj_v, const Type& adj_ret)
 {
-    // For both nan_propagate_t and nan_as_missing_t, the gradient flows to
-    // whichever index the forward returned. argmin(v) follows the same
-    // comparison shape as the forward reduction, which is exact for
-    // nan_propagate_t and a reasonable fallback for nan_as_missing_t when
-    // there is at least one finite element.
-    unsigned i = argmin(v);
+    // Pick the index using the same NaN-handling comparator as the forward
+    // reduction so the gradient is routed to the slot the forward returned.
+    unsigned i = _argmin_impl(v, NanBehavior {});
     adj_v[i] += adj_ret;
 }
 
@@ -2078,7 +2127,9 @@ inline CUDA_CALLABLE void adj_max(const vec_t<Length, Type>& v, vec_t<Length, Ty
 template <typename NanBehavior, unsigned Length, typename Type>
 inline CUDA_CALLABLE void adj_max(const vec_t<Length, Type>& v, vec_t<Length, Type>& adj_v, const Type& adj_ret)
 {
-    unsigned i = argmax(v);
+    // Pick the index using the same NaN-handling comparator as the forward
+    // reduction so the gradient is routed to the slot the forward returned.
+    unsigned i = _argmax_impl(v, NanBehavior {});
     adj_v[i] += adj_ret;
 }
 
