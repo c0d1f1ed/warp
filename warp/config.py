@@ -116,6 +116,13 @@ under both settings, matching the C99 ``fmin``/``fmax`` allowance. Use
 Note: This is a compile-time setting -- modules are recompiled when it
 changes. Per-kernel mixing within one Warp session is supported via
 module-options hashing.
+
+Deprecation timeline: this flag is provided in Warp 1.14 as an opt-in
+for the behavior change. A future release will flip the default to
+``True``; the release after that will deprecate the flag (warn on
+explicit ``False``); a subsequent release will remove it entirely along
+with the historical asymmetric ``a<b?a:b`` implementation. Audit kernels
+that rely on the historical behavior before the default flip.
 """
 
 legacy_scalar_return_types: bool = False
