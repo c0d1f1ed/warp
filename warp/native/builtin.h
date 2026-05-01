@@ -594,14 +594,10 @@ inline CUDA_CALLABLE T div(T a, T b) { return a/b; } \
 inline CUDA_CALLABLE T add(T a, T b) { return a+b; } \
 inline CUDA_CALLABLE T sub(T a, T b) { return a-b; } \
 inline CUDA_CALLABLE T mod(T a, T b) { return a%b; } \
-inline CUDA_CALLABLE T min_impl(T a, T b, nan_propagate_t) { return a<b?a:b; } \
-inline CUDA_CALLABLE T min_impl(T a, T b, nan_as_missing_t) { return a<b?a:b; } \
-inline CUDA_CALLABLE T max_impl(T a, T b, nan_propagate_t) { return a>b?a:b; } \
-inline CUDA_CALLABLE T max_impl(T a, T b, nan_as_missing_t) { return a>b?a:b; } \
-template <typename Tag = nan_propagate_t> \
-inline CUDA_CALLABLE T min(T a, T b) { return min_impl(a, b, Tag{}); } \
-template <typename Tag = nan_propagate_t> \
-inline CUDA_CALLABLE T max(T a, T b) { return max_impl(a, b, Tag{}); } \
+template <typename = nan_propagate_t> \
+inline CUDA_CALLABLE T min(T a, T b) { return a<b?a:b; } \
+template <typename = nan_propagate_t> \
+inline CUDA_CALLABLE T max(T a, T b) { return a>b?a:b; } \
 template <typename Tag = nan_propagate_t> \
 inline CUDA_CALLABLE T clamp(T x, T a, T b) { return min<Tag>(max<Tag>(a, x), b); } \
 inline CUDA_CALLABLE T floordiv(T a, T b) { return a/b; } \
@@ -618,13 +614,13 @@ inline CUDA_CALLABLE void adj_div(T a, T b, T ret, T& adj_a, T& adj_b, T adj_ret
 inline CUDA_CALLABLE void adj_add(T a, T b, T& adj_a, T& adj_b, T adj_ret) { } \
 inline CUDA_CALLABLE void adj_sub(T a, T b, T& adj_a, T& adj_b, T adj_ret) { } \
 inline CUDA_CALLABLE void adj_mod(T a, T b, T& adj_a, T& adj_b, T adj_ret) { } \
-template <typename Tag = nan_propagate_t> \
+template <typename = nan_propagate_t> \
 inline CUDA_CALLABLE void adj_min(T a, T b, T& adj_a, T& adj_b, T adj_ret) { } \
-template <typename Tag = nan_propagate_t> \
+template <typename = nan_propagate_t> \
 inline CUDA_CALLABLE void adj_max(T a, T b, T& adj_a, T& adj_b, T adj_ret) { } \
 inline CUDA_CALLABLE void adj_abs(T x, T adj_x, T& adj_ret) { } \
 inline CUDA_CALLABLE void adj_sign(T x, T adj_x, T& adj_ret) { } \
-template <typename Tag = nan_propagate_t> \
+template <typename = nan_propagate_t> \
 inline CUDA_CALLABLE void adj_clamp(T x, T a, T b, T& adj_x, T& adj_a, T& adj_b, T adj_ret) { } \
 inline CUDA_CALLABLE void adj_floordiv(T a, T b, T& adj_a, T& adj_b, T adj_ret) { } \
 inline CUDA_CALLABLE void adj_step(T x, T& adj_x, T adj_ret) { } \
@@ -700,6 +696,31 @@ inline bool CUDA_CALLABLE isinf(bfloat16 x) { return ::isinf(float(x)); }
 inline bool CUDA_CALLABLE isinf(float x) { return ::isinf(x); }
 inline bool CUDA_CALLABLE isinf(double x) { return ::isinf(x); }
 
+// NaN-as-missing min/max (C fmin/fmax semantics), used when
+// `wp.config.standard_min_max=True`. CUDA exposes these as single-instruction
+// fminf/fmin intrinsics; the CPU clang JIT CRT does not, so we fall back to
+// a portable isnan-based implementation. half/bfloat16 round-trip through
+// float is exact because the result is always one of the inputs.
+#ifdef __CUDA_ARCH__
+inline CUDA_CALLABLE float _wp_native_fmin(float a, float b) { return ::fminf(a, b); }
+inline CUDA_CALLABLE double _wp_native_fmin(double a, double b) { return ::fmin(a, b); }
+inline CUDA_CALLABLE half _wp_native_fmin(half a, half b) { return half(::fminf(float(a), float(b))); }
+#ifndef WP_NO_BFLOAT16
+inline CUDA_CALLABLE bfloat16 _wp_native_fmin(bfloat16 a, bfloat16 b) { return bfloat16(::fminf(float(a), float(b))); }
+#endif
+inline CUDA_CALLABLE float _wp_native_fmax(float a, float b) { return ::fmaxf(a, b); }
+inline CUDA_CALLABLE double _wp_native_fmax(double a, double b) { return ::fmax(a, b); }
+inline CUDA_CALLABLE half _wp_native_fmax(half a, half b) { return half(::fmaxf(float(a), float(b))); }
+#ifndef WP_NO_BFLOAT16
+inline CUDA_CALLABLE bfloat16 _wp_native_fmax(bfloat16 a, bfloat16 b) { return bfloat16(::fmaxf(float(a), float(b))); }
+#endif
+#else
+template <typename T> inline CUDA_CALLABLE T _wp_native_fmin(T a, T b)
+    { return ::isnan(float(a)) ? b : (::isnan(float(b)) ? a : (a<b?a:b)); }
+template <typename T> inline CUDA_CALLABLE T _wp_native_fmax(T a, T b)
+    { return ::isnan(float(a)) ? b : (::isnan(float(b)) ? a : (a>b?a:b)); }
+#endif
+
 template <typename T> inline CUDA_CALLABLE void print(const T&) { printf("<type without print implementation>\n"); }
 
 inline CUDA_CALLABLE void print(float16 f) { printf("%g\n", half_to_float(f)); }
@@ -719,11 +740,9 @@ inline CUDA_CALLABLE T mul(T a, T b) { return a*b; } \
 inline CUDA_CALLABLE T add(T a, T b) { return a+b; } \
 inline CUDA_CALLABLE T sub(T a, T b) { return a-b; } \
 inline CUDA_CALLABLE T min_impl(T a, T b, nan_propagate_t) { return a<b?a:b; } \
-inline CUDA_CALLABLE T min_impl(T a, T b, nan_as_missing_t) \
-    { return ::isnan(float(a)) ? b : (::isnan(float(b)) ? a : (a<b?a:b)); } \
+inline CUDA_CALLABLE T min_impl(T a, T b, nan_as_missing_t) { return _wp_native_fmin(a, b); } \
 inline CUDA_CALLABLE T max_impl(T a, T b, nan_propagate_t) { return a>b?a:b; } \
-inline CUDA_CALLABLE T max_impl(T a, T b, nan_as_missing_t) \
-    { return ::isnan(float(a)) ? b : (::isnan(float(b)) ? a : (a>b?a:b)); } \
+inline CUDA_CALLABLE T max_impl(T a, T b, nan_as_missing_t) { return _wp_native_fmax(a, b); } \
 template <typename Tag = nan_propagate_t> \
 inline CUDA_CALLABLE T min(T a, T b) { return min_impl(a, b, Tag{}); } \
 template <typename Tag = nan_propagate_t> \
