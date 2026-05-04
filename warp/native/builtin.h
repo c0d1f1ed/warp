@@ -824,17 +824,14 @@ inline CUDA_CALLABLE void adj_clamp_impl(T x, T a, T b, T& adj_x, T& adj_a, T& a
 }\
 inline CUDA_CALLABLE void adj_clamp_impl(T x, T a, T b, T& adj_x, T& adj_a, T& adj_b, T adj_ret, nan_as_missing_t)\
 {\
-    /* Forward expands to min<.>(max<.>(a, x), b). With NaN-as-missing:    */\
-    /* - if x is NaN: max returns a, then min(a, b) picks the smaller bound */\
-    /* - if a is NaN: max returns x, then min(x, b) -> standard clamp on (x,b) */\
-    /* - if b is NaN: min returns max(a, x) -> standard clamp on (x,a)        */\
-    /* For unambiguous (no-NaN) inputs, behavior matches nan_propagate_t.     */\
-    if (::isnan(float(x)))      { /* gradient on a NaN input is 0 */ }\
-    else if (::isnan(float(a))) { if (x > b) adj_b += adj_ret; else adj_x += adj_ret; }\
-    else if (::isnan(float(b))) { if (x < a) adj_a += adj_ret; else adj_x += adj_ret; }\
-    else if (x < a)             adj_a += adj_ret;\
-    else if (x > b)             adj_b += adj_ret;\
-    else                        adj_x += adj_ret;\
+    /* Forward expands to min<.>(max<.>(a, x), b). Apply the chain rule via */\
+    /* the already-correct adj_min_impl / adj_max_impl: the routing handles */\
+    /* every NaN combination consistently (e.g. when x is NaN the output    */\
+    /* equals min(a, b) and the gradient flows to whichever bound won).     */\
+    T m = max_impl(a, x, nan_as_missing_t{});\
+    T adj_m = T(0);\
+    adj_min_impl(m, b, adj_m, adj_b, adj_ret, nan_as_missing_t{});\
+    adj_max_impl(a, x, adj_a, adj_x, adj_m, nan_as_missing_t{});\
 }\
 template <typename NanBehavior = nan_propagate_t> \
 inline CUDA_CALLABLE void adj_clamp(T x, T a, T b, T& adj_x, T& adj_a, T& adj_b, T adj_ret)\

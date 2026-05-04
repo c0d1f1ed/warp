@@ -555,6 +555,66 @@ def test_minmax_standard_vec(test, device, dtype, register_kernels=False):
         assert_float_eq(test, actual_red_mx[i], expected_red_mx[i], f"wp.max(vec3)[row {i}] [standard]")
 
 
+def test_clamp_adjoint_standard(test, device, dtype, register_kernels=False):
+    # Under standard_min_max=True, adj_clamp must follow the chain rule of
+    # min<.>(max<.>(a, x), b): when an input is NaN, the gradient should still
+    # route to whichever of x/a/b the forward output depended on (rather than
+    # being silently dropped). E.g. clamp(NaN, a, b) returns min(a, b), so the
+    # gradient must flow to that surviving bound.
+
+    def kern(
+        x: wp.array(dtype=dtype),
+        a: wp.array(dtype=dtype),
+        b: wp.array(dtype=dtype),
+        out: wp.array(dtype=dtype),
+    ):
+        i = wp.tid()
+        out[i] = wp.clamp(x[i], a[i], b[i])
+
+    kernel = getkernel(kern, suffix="clamp_adj_standard_" + dtype.__name__)
+
+    if register_kernels:
+        return
+
+    nan = float("nan")
+    # (x, a, b, expected_grad_x, expected_grad_a, expected_grad_b).
+    rows = [
+        (nan, -1.0, 1.0, 0.0, 1.0, 0.0),  # forward = min(-1, 1) = -1; depends on a
+        (nan, 1.0, -1.0, 0.0, 0.0, 1.0),  # forward = min(1, -1) = -1; depends on b
+        (0.5, nan, 1.0, 1.0, 0.0, 0.0),  # forward = min(max(NaN, 0.5), 1) = 0.5; depends on x
+        (2.0, nan, 1.0, 0.0, 0.0, 1.0),  # forward = min(2, 1) = 1; depends on b
+        (-2.0, -1.0, nan, 0.0, 1.0, 0.0),  # forward = max(-1, -2) = -1; depends on a
+        (0.5, -1.0, 1.0, 1.0, 0.0, 0.0),  # forward = 0.5; depends on x (no NaN)
+    ]
+
+    saved = wp.config.standard_min_max
+    wp.config.standard_min_max = True
+    kernel.module.mark_modified()
+    try:
+        n = len(rows)
+        x = wp.array([r[0] for r in rows], dtype=dtype, device=device, requires_grad=True)
+        a = wp.array([r[1] for r in rows], dtype=dtype, device=device, requires_grad=True)
+        b = wp.array([r[2] for r in rows], dtype=dtype, device=device, requires_grad=True)
+        out = wp.zeros(n, dtype=dtype, device=device, requires_grad=True)
+
+        tape = wp.Tape()
+        with tape:
+            wp.launch(kernel, dim=n, inputs=[x, a, b], outputs=[out], device=device)
+        out.grad.fill_(dtype(1.0))
+        tape.backward()
+        actual_grad_x = x.grad.numpy()
+        actual_grad_a = a.grad.numpy()
+        actual_grad_b = b.grad.numpy()
+    finally:
+        wp.config.standard_min_max = saved
+        kernel.module.mark_modified()
+
+    for i, (xi, ai, bi, gx, ga, gb) in enumerate(rows):
+        assert_float_eq(test, actual_grad_x[i], gx, f"adj_clamp x[{i}] (x={xi}, a={ai}, b={bi}) [standard]")
+        assert_float_eq(test, actual_grad_a[i], ga, f"adj_clamp a[{i}] (x={xi}, a={ai}, b={bi}) [standard]")
+        assert_float_eq(test, actual_grad_b[i], gb, f"adj_clamp b[{i}] (x={xi}, a={ai}, b={bi}) [standard]")
+
+
 def test_minmax_reduction_adjoint_standard(test, device, dtype, register_kernels=False):
     # Under standard_min_max=True, the reduction adjoint adj_min<NB>(vec)/
     # adj_max<NB>(vec) must route the gradient to the index the forward picked.
@@ -913,6 +973,13 @@ for dtype in [wp.float16, wp.float32, wp.float64]:
         TestSpecialValues,
         f"test_minmax_reduction_adjoint_standard_{dtype.__name__}",
         test_minmax_reduction_adjoint_standard,
+        devices=devices,
+        dtype=dtype,
+    )
+    add_function_test_register_kernel(
+        TestSpecialValues,
+        f"test_clamp_adjoint_standard_{dtype.__name__}",
+        test_clamp_adjoint_standard,
         devices=devices,
         dtype=dtype,
     )
