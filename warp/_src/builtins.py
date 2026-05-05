@@ -10114,6 +10114,7 @@ for array_type in array_types:
         constraint=atomic_op_constraint,
         value_func=create_atomic_op_value_func("min"),
         dispatch_func=atomic_minmax_dispatch_func,
+        adjoint_takes_template_args=True,
         doc="""Compute the minimum of ``value`` and ``arr[i]``, atomically update the array, and return the old value.
 
         The operation is only atomic on a per-component basis for vectors and matrices.""",
@@ -10127,6 +10128,7 @@ for array_type in array_types:
         constraint=atomic_op_constraint,
         value_func=create_atomic_op_value_func("min"),
         dispatch_func=atomic_minmax_dispatch_func,
+        adjoint_takes_template_args=True,
         doc="""Compute the minimum of ``value`` and ``arr[i,j]``, atomically update the array, and return the old value.
 
         The operation is only atomic on a per-component basis for vectors and matrices.""",
@@ -10140,6 +10142,7 @@ for array_type in array_types:
         constraint=atomic_op_constraint,
         value_func=create_atomic_op_value_func("min"),
         dispatch_func=atomic_minmax_dispatch_func,
+        adjoint_takes_template_args=True,
         doc="""Compute the minimum of ``value`` and ``arr[i,j,k]``, atomically update the array, and return the old value.
 
         The operation is only atomic on a per-component basis for vectors and matrices.""",
@@ -10153,6 +10156,7 @@ for array_type in array_types:
         constraint=atomic_op_constraint,
         value_func=create_atomic_op_value_func("min"),
         dispatch_func=atomic_minmax_dispatch_func,
+        adjoint_takes_template_args=True,
         doc="""Compute the minimum of ``value`` and ``arr[i,j,k,l]``, atomically update the array, and return the old value.
 
         The operation is only atomic on a per-component basis for vectors and matrices.""",
@@ -10167,6 +10171,7 @@ for array_type in array_types:
         constraint=atomic_op_constraint,
         value_func=create_atomic_op_value_func("max"),
         dispatch_func=atomic_minmax_dispatch_func,
+        adjoint_takes_template_args=True,
         doc="""Compute the maximum of ``value`` and ``arr[i]``, atomically update the array, and return the old value.
 
         The operation is only atomic on a per-component basis for vectors and matrices.""",
@@ -10180,6 +10185,7 @@ for array_type in array_types:
         constraint=atomic_op_constraint,
         value_func=create_atomic_op_value_func("max"),
         dispatch_func=atomic_minmax_dispatch_func,
+        adjoint_takes_template_args=True,
         doc="""Compute the maximum of ``value`` and ``arr[i,j]``, atomically update the array, and return the old value.
 
         The operation is only atomic on a per-component basis for vectors and matrices.""",
@@ -10193,6 +10199,7 @@ for array_type in array_types:
         constraint=atomic_op_constraint,
         value_func=create_atomic_op_value_func("max"),
         dispatch_func=atomic_minmax_dispatch_func,
+        adjoint_takes_template_args=True,
         doc="""Compute the maximum of ``value`` and ``arr[i,j,k]``, atomically update the array, and return the old value.
 
         The operation is only atomic on a per-component basis for vectors and matrices.""",
@@ -10206,6 +10213,7 @@ for array_type in array_types:
         constraint=atomic_op_constraint,
         value_func=create_atomic_op_value_func("max"),
         dispatch_func=atomic_minmax_dispatch_func,
+        adjoint_takes_template_args=True,
         doc="""Compute the maximum of ``value`` and ``arr[i,j,k,l]``, atomically update the array, and return the old value.
 
         The operation is only atomic on a per-component basis for vectors and matrices.""",

@@ -687,6 +687,69 @@ def test_minmax_reduction_adjoint_standard(test, device, dtype, register_kernels
             )
 
 
+def test_atomic_minmax_adjoint_standard(test, device, dtype, register_kernels=False):
+    # Under standard_min_max=True, adj_atomic_min/max must accumulate the
+    # gradient onto `value` whenever the forward op committed `value`'s payload
+    # to the slot -- including when both operands were NaN. The standard
+    # `value == *addr` check returns false for NaN==NaN and would drop the
+    # gradient even though forward effects happened. The nan_as_missing_t
+    # adjoint specialization in builtin.h has an explicit both-NaN branch
+    # to avoid that footgun.
+
+    def kern(
+        slot: wp.array(dtype=dtype),
+        value: wp.array(dtype=dtype),
+        out: wp.array(dtype=dtype),
+    ):
+        i = wp.tid()
+        out[i] = wp.atomic_min(slot, i, value[i])
+
+    kernel = getkernel(kern, suffix="atomic_min_adj_standard_" + dtype.__name__)
+
+    if register_kernels:
+        return
+
+    nan = float("nan")
+    # (slot, value, expected_grad_value)
+    # - slot=NaN, value=NaN: forward writes value's payload (slot ends up NaN).
+    #   Without the both-NaN branch the adjoint would drop the gradient.
+    # - slot=NaN, value=2: forward writes 2 (slot was NaN). value won; full grad.
+    # - slot=2,   value=NaN: forward keeps slot=2. value lost; zero grad.
+    # - slot=5,   value=2:   forward writes 2. value won; full grad.
+    # - slot=2,   value=5:   forward keeps slot=2. value lost; zero grad.
+    rows = [
+        (nan, nan, 1.0),
+        (nan, 2.0, 1.0),
+        (2.0, nan, 0.0),
+        (5.0, 2.0, 1.0),
+        (2.0, 5.0, 0.0),
+    ]
+
+    saved = wp.config.standard_min_max
+    wp.config.standard_min_max = True
+    kernel.module.mark_modified()
+    try:
+        n = len(rows)
+        slot = wp.array([r[0] for r in rows], dtype=dtype, device=device, requires_grad=True)
+        value = wp.array([r[1] for r in rows], dtype=dtype, device=device, requires_grad=True)
+        out = wp.zeros(n, dtype=dtype, device=device, requires_grad=True)
+
+        tape = wp.Tape()
+        with tape:
+            wp.launch(kernel, dim=n, inputs=[slot, value], outputs=[out], device=device)
+        slot.grad.fill_(dtype(1.0))
+        tape.backward()
+        actual_grad_value = value.grad.numpy()
+    finally:
+        wp.config.standard_min_max = saved
+        kernel.module.mark_modified()
+
+    for i, (s, v, expected) in enumerate(rows):
+        assert_float_eq(
+            test, actual_grad_value[i], expected, f"adj_atomic_min grad value[{i}] (slot={s}, value={v}) [standard]"
+        )
+
+
 def test_atomic_minmax_standard(test, device, dtype, register_kernels=False):
     # wp.atomic_min / wp.atomic_max are intended to behave like their non-atomic
     # counterparts under the same value of wp.config.standard_min_max. With the
@@ -1004,6 +1067,13 @@ for dtype in [wp.float32, wp.float64]:
         TestSpecialValues,
         f"test_atomic_minmax_standard_{dtype.__name__}",
         test_atomic_minmax_standard,
+        devices=devices,
+        dtype=dtype,
+    )
+    add_function_test_register_kernel(
+        TestSpecialValues,
+        f"test_atomic_minmax_adjoint_standard_{dtype.__name__}",
+        test_atomic_minmax_adjoint_standard,
         devices=devices,
         dtype=dtype,
     )

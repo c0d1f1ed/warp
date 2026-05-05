@@ -2226,7 +2226,7 @@ inline CUDA_CALLABLE vec_t<Length, Type> atomic_xor(vec_t<Length, Type>* addr, v
     return ret;
 }
 
-template <unsigned Length, typename Type>
+template <typename NanBehavior = nan_propagate_t, unsigned Length, typename Type>
 inline CUDA_CALLABLE void adj_atomic_minmax(
     vec_t<Length, Type>* addr,
     vec_t<Length, Type>* adj_addr,
@@ -2235,7 +2235,7 @@ inline CUDA_CALLABLE void adj_atomic_minmax(
 )
 {
     for (unsigned i = 0; i < Length; ++i)
-        adj_atomic_minmax(&(addr->c[i]), &(adj_addr->c[i]), value[i], adj_value[i]);
+        adj_atomic_minmax<NanBehavior>(&(addr->c[i]), &(adj_addr->c[i]), value[i], adj_value[i]);
 }
 
 // ok, the original implementation of this didn't take the absolute values.

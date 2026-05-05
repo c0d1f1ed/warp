@@ -483,7 +483,7 @@ inline CUDA_CALLABLE mat_t<Rows, Cols, Type> atomic_max(mat_t<Rows, Cols, Type>*
     return m;
 }
 
-template <unsigned Rows, unsigned Cols, typename Type>
+template <typename NanBehavior = nan_propagate_t, unsigned Rows, unsigned Cols, typename Type>
 inline CUDA_CALLABLE void adj_atomic_minmax(
     mat_t<Rows, Cols, Type>* addr,
     mat_t<Rows, Cols, Type>* adj_addr,
@@ -493,7 +493,9 @@ inline CUDA_CALLABLE void adj_atomic_minmax(
 {
     for (unsigned i = 0; i < Rows; ++i)
         for (unsigned j = 0; j < Cols; ++j)
-            adj_atomic_minmax(&addr->data[i][j], &adj_addr->data[i][j], value.data[i][j], adj_value.data[i][j]);
+            adj_atomic_minmax<NanBehavior>(
+                &addr->data[i][j], &adj_addr->data[i][j], value.data[i][j], adj_value.data[i][j]
+            );
 }
 
 template <unsigned Rows, unsigned Cols, typename Type>
