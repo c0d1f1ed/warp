@@ -2200,9 +2200,14 @@ template <typename NanBehavior = nan_propagate_t> inline CUDA_CALLABLE float ato
         do {
             assumed = old;
             int min_as_i = __float_as_int(min<NanBehavior>(__int_as_float(assumed), val));
-            // Bit-equal: in-loop optimization, skips CAS when the result
-            // would not change. Required for correctness under nan_as_missing_t
+            // Bit-equal optimization: skip CAS when the result's bit pattern
+            // matches `assumed`. Required for correctness under nan_as_missing_t
             // (which has no pre-loop guard) and harmless under nan_propagate_t.
+            // Note this is bit-equal, not semantic: when both `assumed` and
+            // `val` are NaN with different payloads, fmin returns one of them
+            // and the CAS proceeds -- the stored payload changes, but the
+            // value stays NaN. Loop termination is unaffected because the next
+            // iteration's `assumed` matches the just-written bits.
             if (min_as_i == assumed)
                 return __int_as_float(old);
             old = atomicCAS(address_as_i, assumed, min_as_i);
