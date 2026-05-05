@@ -84,12 +84,14 @@ def _minmax_dispatch_func(input_types: Mapping[str, type], return_type: Any, arg
     """Codegen-time dispatch for wp.min / wp.max / wp.clamp.
 
     Emits a C++ template tag (``wp::nan_propagate_t`` or ``wp::nan_as_missing_t``)
-    based on ``warp.config.standard_min_max``. The tag selects the corresponding
-    forward and adjoint specializations in ``warp/native/builtin.h``.
+    based on the ``standard_min_max`` flag in the current builder options.
+    Reads from ``warp._src.codegen.options`` (which ``Adjoint.build`` sets to
+    the snapshotted module options before invoking dispatch_func) rather than
+    ``warp.config`` so codegen cannot disagree with the hash if the global
+    flag is mutated between hash computation and codegen.
     """
-    import warp.config as _cfg  # noqa: PLC0415  -- read at codegen time
-
-    tag = "wp::nan_as_missing_t" if _cfg.standard_min_max else "wp::nan_propagate_t"
+    standard = warp._src.codegen.options.get("standard_min_max", False)
+    tag = "wp::nan_as_missing_t" if standard else "wp::nan_propagate_t"
     return tuple(args.values()), (tag,)
 
 
@@ -9977,17 +9979,19 @@ def atomic_op_dispatch_func(input_types: Mapping[str, type], return_type: Any, a
 
 
 def atomic_minmax_dispatch_func(input_types: Mapping[str, type], return_type: Any, args: Mapping[str, Var]):
-    # Same write-tracking as atomic_op_dispatch_func, but also emits a NaN-handling
-    # tag template arg so atomic_min / atomic_max stay consistent with the non-atomic
-    # min / max under wp.config.standard_min_max.
+    # Same write-tracking as atomic_op_dispatch_func, but also emits a
+    # NaN-handling tag template arg so atomic_min / atomic_max stay consistent
+    # with the non-atomic min / max under standard_min_max. Reads the flag
+    # from warp._src.codegen.options (set by Adjoint.build to the snapshotted
+    # module options) rather than warp.config, matching the existing
+    # convention used by atomic_op_dispatch_func.
     if warp._src.codegen.options.get("verify_autograd_array_access", False):
         arr = args["arr"]
         arr.mark_write()
 
-    import warp.config as _cfg  # noqa: PLC0415  -- read at codegen time
-
     func_args = tuple(args.values())
-    tag = "wp::nan_as_missing_t" if _cfg.standard_min_max else "wp::nan_propagate_t"
+    standard = warp._src.codegen.options.get("standard_min_max", False)
+    tag = "wp::nan_as_missing_t" if standard else "wp::nan_propagate_t"
     template_args = (tag,)
 
     return (func_args, template_args)
