@@ -619,6 +619,8 @@ template <typename = nan_propagate_t> \
 inline CUDA_CALLABLE void adj_min(T a, T b, T& adj_a, T& adj_b, T adj_ret) { } \
 template <typename = nan_propagate_t> \
 inline CUDA_CALLABLE void adj_max(T a, T b, T& adj_a, T& adj_b, T adj_ret) { } \
+template <typename = nan_propagate_t> \
+inline CUDA_CALLABLE void adj_atomic_minmax(T* buf, T* adj_buf, const T& value, T& adj_value) { } \
 inline CUDA_CALLABLE void adj_abs(T x, T adj_x, T& adj_ret) { } \
 inline CUDA_CALLABLE void adj_sign(T x, T adj_x, T& adj_ret) { } \
 template <typename = nan_propagate_t> \
@@ -2431,48 +2433,6 @@ CUDA_CALLABLE inline void adj_atomic_minmax(T* addr, T* adj_addr, const T& value
 {
     adj_atomic_minmax_impl(addr, adj_addr, value, adj_value, NanBehavior {});
 }
-
-// For integral types we do not accumulate gradients. Templated on a phantom
-// NanBehavior parameter so calls like adj_atomic_minmax<NB>(int8*, ...) -- which
-// can only resolve to function templates -- still match these no-op overloads
-// in preference to the generic float-side body.
-template <typename = nan_propagate_t>
-CUDA_CALLABLE inline void adj_atomic_minmax(int8* buf, int8* adj_buf, const int8& value, int8& adj_value)
-{
-}
-template <typename = nan_propagate_t>
-CUDA_CALLABLE inline void adj_atomic_minmax(uint8* buf, uint8* adj_buf, const uint8& value, uint8& adj_value)
-{
-}
-template <typename = nan_propagate_t>
-CUDA_CALLABLE inline void adj_atomic_minmax(int16* buf, int16* adj_buf, const int16& value, int16& adj_value)
-{
-}
-template <typename = nan_propagate_t>
-CUDA_CALLABLE inline void adj_atomic_minmax(uint16* buf, uint16* adj_buf, const uint16& value, uint16& adj_value)
-{
-}
-template <typename = nan_propagate_t>
-CUDA_CALLABLE inline void adj_atomic_minmax(int32* buf, int32* adj_buf, const int32& value, int32& adj_value)
-{
-}
-template <typename = nan_propagate_t>
-CUDA_CALLABLE inline void adj_atomic_minmax(uint32* buf, uint32* adj_buf, const uint32& value, uint32& adj_value)
-{
-}
-template <typename = nan_propagate_t>
-CUDA_CALLABLE inline void adj_atomic_minmax(int64* buf, int64* adj_buf, const int64& value, int64& adj_value)
-{
-}
-template <typename = nan_propagate_t>
-CUDA_CALLABLE inline void adj_atomic_minmax(uint64* buf, uint64* adj_buf, const uint64& value, uint64& adj_value)
-{
-}
-template <typename = nan_propagate_t>
-CUDA_CALLABLE inline void adj_atomic_minmax(bool* buf, bool* adj_buf, const bool& value, bool& adj_value)
-{
-}
-
 
 template <typename T> inline CUDA_CALLABLE T atomic_cas(T* address, T compare, T val)
 {
