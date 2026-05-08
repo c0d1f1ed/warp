@@ -91,23 +91,24 @@ enable_vector_component_overwrites: bool = False
 Note: Enabling this may significantly increase kernel compilation time.
 """
 
-standard_min_max: bool = False
+standard_min_max: bool = True
 """Use standard min/max semantics for ``wp.min``, ``wp.max``, ``wp.clamp``,
 ``wp.atomic_min``, and ``wp.atomic_max``.
 
-When ``True``, these builtins follow C ``fmin``/``fmax`` NaN handling
-(NaN-as-missing, symmetric in argument order, IEEE 754-2008
+When ``True`` (default), these builtins follow C ``fmin``/``fmax`` NaN
+handling (NaN-as-missing, symmetric in argument order, IEEE 754-2008
 ``minNum``/``maxNum``). For example, both ``wp.min(-1, NaN)`` and
 ``wp.min(NaN, -1)`` return ``-1``. ``wp.atomic_min`` / ``wp.atomic_max``
 behave like the non-atomic version under the same flag value, in particular
 matching the non-atomic semantics in the absence of contention.
 
-When ``False`` (default), ``wp.min`` / ``wp.max`` use Warp's historical
-``a<b?a:b`` implementation, which is asymmetric in NaN inputs:
-``wp.min(-1, NaN)`` returns ``NaN`` while ``wp.min(NaN, -1)`` returns ``-1``.
-``wp.atomic_min`` / ``wp.atomic_max`` keep their historical pre-loop guard,
-which makes NaN inputs a no-op on CUDA -- different from the non-atomic
-version, but preserved for backward compatibility.
+When ``False``, ``wp.min`` / ``wp.max`` use Warp's historical ``a<b?a:b``
+implementation, which is asymmetric in NaN inputs: ``wp.min(-1, NaN)``
+returns ``NaN`` while ``wp.min(NaN, -1)`` returns ``-1``. ``wp.atomic_min``
+/ ``wp.atomic_max`` keep their historical pre-loop guard, which makes NaN
+inputs a no-op on CUDA -- different from the non-atomic version. Set this
+to ``False`` only as a temporary workaround if a kernel relies on the
+historical behavior.
 
 Note: Behavior on signed-zero ties (``min(-0, +0)``) is implementation-defined
 under both settings, matching the C99 ``fmin``/``fmax`` allowance. Use
@@ -117,12 +118,11 @@ Note: This is a compile-time setting -- modules are recompiled when it
 changes. Per-kernel mixing within one Warp session is supported via
 module-options hashing.
 
-Deprecation timeline: this flag is provided in Warp 1.14 as an opt-in
-for the behavior change. A future release will flip the default to
-``True``; the release after that will deprecate the flag (warn on
-explicit ``False``); a subsequent release will remove it entirely along
-with the historical asymmetric ``a<b?a:b`` implementation. Audit kernels
-that rely on the historical behavior before the default flip.
+Deprecation timeline: Warp 1.14 makes the standard semantics the default.
+A future release will deprecate the flag (warn on explicit ``False``); a
+subsequent release will remove it entirely along with the historical
+asymmetric ``a<b?a:b`` implementation. Audit any kernels that explicitly
+disable this flag and migrate them off the historical behavior.
 """
 
 legacy_scalar_return_types: bool = False

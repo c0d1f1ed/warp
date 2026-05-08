@@ -251,12 +251,14 @@ def assert_float_eq(test, actual, expected, msg):
 
 
 def test_minmax_special_values_scalar(test, device, dtype, register_kernels=False):
-    # wp.min/wp.max are implemented as `a<b?a:b` and `a>b?a:b` respectively
-    # (see `DECLARE_FLOAT_OPS` in warp/native/builtin.h). They therefore return
-    # the second argument on every "tie" the comparison cannot resolve --
-    # including NaN inputs and signed zeros that compare equal. No NumPy
-    # function (np.minimum, np.maximum, np.fmin, np.fmax, np.min, np.max)
-    # exhibits this asymmetry, so expected values are written out explicitly.
+    # Regression guard for the standard_min_max=False (legacy) path. With the
+    # flag off, wp.min/wp.max are implemented as `a<b?a:b` and `a>b?a:b`
+    # respectively (see `DECLARE_FLOAT_OPS` in warp/native/builtin.h) and
+    # therefore return the second argument on every "tie" the comparison
+    # cannot resolve -- including NaN inputs and signed zeros that compare
+    # equal. No NumPy function (np.minimum, np.maximum, np.fmin, np.fmax,
+    # np.min, np.max) exhibits this asymmetry, so expected values are written
+    # out explicitly.
 
     def check_minmax(
         a: wp.array(dtype=dtype),
@@ -283,20 +285,31 @@ def test_minmax_special_values_scalar(test, device, dtype, register_kernels=Fals
     expected_max = [nan, -1.0, nan, 2.0, 0.0, -0.0, 2.0, nan]
 
     n = len(inputs_a)
-    a = wp.array(inputs_a, dtype=dtype, device=device)
-    b = wp.array(inputs_b, dtype=dtype, device=device)
-    mn = wp.empty(n, dtype=dtype, device=device)
-    mx = wp.empty(n, dtype=dtype, device=device)
-    wp.launch(kernel, dim=n, inputs=[a, b], outputs=[mn, mx], device=device)
+    saved = wp.config.standard_min_max
+    wp.config.standard_min_max = False
+    # The module hash caches the resolved options; flipping a global flag
+    # mid-session requires explicit invalidation so the new flag value is
+    # picked up at the next launch.
+    kernel.module.mark_modified()
+    try:
+        a = wp.array(inputs_a, dtype=dtype, device=device)
+        b = wp.array(inputs_b, dtype=dtype, device=device)
+        mn = wp.empty(n, dtype=dtype, device=device)
+        mx = wp.empty(n, dtype=dtype, device=device)
+        wp.launch(kernel, dim=n, inputs=[a, b], outputs=[mn, mx], device=device)
+        actual_min = mn.to("cpu").list()
+        actual_max = mx.to("cpu").list()
+    finally:
+        wp.config.standard_min_max = saved
+        kernel.module.mark_modified()
 
-    actual_min = mn.to("cpu").list()
-    actual_max = mx.to("cpu").list()
     for i in range(n):
         assert_float_eq(test, actual_min[i], expected_min[i], f"wp.min({inputs_a[i]}, {inputs_b[i]})")
         assert_float_eq(test, actual_max[i], expected_max[i], f"wp.max({inputs_a[i]}, {inputs_b[i]})")
 
 
 def test_minmax_special_values_vec(test, device, dtype, register_kernels=False):
+    # Regression guard for the standard_min_max=False (legacy) path.
     # Element-wise wp.min/wp.max over vec3 apply the scalar `a<b?a:b` rule
     # per component. Vector reduction wp.min(v) / wp.max(v) seeds the result
     # with v[0] and only updates if `v[i] < ret` / `v[i] > ret`, so a NaN at
@@ -349,19 +362,6 @@ def test_minmax_special_values_vec(test, device, dtype, register_kernels=False):
     ]
 
     n_elem = len(elem_a)
-    a_arr = wp.array(elem_a, dtype=vec3_t, device=device)
-    b_arr = wp.array(elem_b, dtype=vec3_t, device=device)
-    mn = wp.empty(n_elem, dtype=vec3_t, device=device)
-    mx = wp.empty(n_elem, dtype=vec3_t, device=device)
-    wp.launch(kernel_elem, dim=n_elem, inputs=[a_arr, b_arr], outputs=[mn, mx], device=device)
-
-    actual_mn = mn.numpy()
-    actual_mx = mx.numpy()
-    for i in range(n_elem):
-        for j in range(3):
-            assert_float_eq(test, actual_mn[i][j], expected_elem_mn[i][j], f"wp.min(vec3, vec3)[{i}][{j}]")
-            assert_float_eq(test, actual_mx[i][j], expected_elem_mx[i][j], f"wp.max(vec3, vec3)[{i}][{j}]")
-
     # Reduction: NaN at index 0 survives; NaN at later indices is dropped.
     red_a = [
         [nan, -1.0, 2.0],  # NaN first -> result is NaN
@@ -371,15 +371,37 @@ def test_minmax_special_values_vec(test, device, dtype, register_kernels=False):
     ]
     expected_red_mn = [nan, -1.0, -1.0, -1.0]
     expected_red_mx = [nan, 2.0, 2.0, 2.0]
-
     n_red = len(red_a)
-    red_arr = wp.array(red_a, dtype=vec3_t, device=device)
-    red_mn = wp.empty(n_red, dtype=dtype, device=device)
-    red_mx = wp.empty(n_red, dtype=dtype, device=device)
-    wp.launch(kernel_red, dim=n_red, inputs=[red_arr], outputs=[red_mn, red_mx], device=device)
 
-    actual_red_mn = red_mn.to("cpu").list()
-    actual_red_mx = red_mx.to("cpu").list()
+    saved = wp.config.standard_min_max
+    wp.config.standard_min_max = False
+    # See test_minmax_special_values_scalar for why mark_modified is needed.
+    kernel_elem.module.mark_modified()
+    kernel_red.module.mark_modified()
+    try:
+        a_arr = wp.array(elem_a, dtype=vec3_t, device=device)
+        b_arr = wp.array(elem_b, dtype=vec3_t, device=device)
+        mn = wp.empty(n_elem, dtype=vec3_t, device=device)
+        mx = wp.empty(n_elem, dtype=vec3_t, device=device)
+        wp.launch(kernel_elem, dim=n_elem, inputs=[a_arr, b_arr], outputs=[mn, mx], device=device)
+        actual_mn = mn.numpy()
+        actual_mx = mx.numpy()
+
+        red_arr = wp.array(red_a, dtype=vec3_t, device=device)
+        red_mn = wp.empty(n_red, dtype=dtype, device=device)
+        red_mx = wp.empty(n_red, dtype=dtype, device=device)
+        wp.launch(kernel_red, dim=n_red, inputs=[red_arr], outputs=[red_mn, red_mx], device=device)
+        actual_red_mn = red_mn.to("cpu").list()
+        actual_red_mx = red_mx.to("cpu").list()
+    finally:
+        wp.config.standard_min_max = saved
+        kernel_elem.module.mark_modified()
+        kernel_red.module.mark_modified()
+
+    for i in range(n_elem):
+        for j in range(3):
+            assert_float_eq(test, actual_mn[i][j], expected_elem_mn[i][j], f"wp.min(vec3, vec3)[{i}][{j}]")
+            assert_float_eq(test, actual_mx[i][j], expected_elem_mx[i][j], f"wp.max(vec3, vec3)[{i}][{j}]")
     for i in range(n_red):
         assert_float_eq(test, actual_red_mn[i], expected_red_mn[i], f"wp.min(vec3)[row {i}]")
         assert_float_eq(test, actual_red_mx[i], expected_red_mx[i], f"wp.max(vec3)[row {i}]")

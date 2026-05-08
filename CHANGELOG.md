@@ -50,6 +50,14 @@
   (e.g. 16 KiB at `n=32`, 64 KiB at `n=64` in `float64`), so large differentiated Cholesky tiles can
   hit shared-memory limits where the previous path would not
   ([GH-1402](https://github.com/NVIDIA/warp/issues/1402)).
+- `wp.min`, `wp.max`, `wp.clamp`, `wp.atomic_min`, and `wp.atomic_max` now use
+  C `fmin`/`fmax` semantics (NaN-as-missing, symmetric in argument order).
+  Both `wp.min(-1, NaN)` and `wp.min(NaN, -1)` return `-1`. Atomic min/max
+  behave like their non-atomic counterparts (consistent across CPU and CUDA),
+  where the historical pre-loop guard previously made NaN inputs a no-op on
+  CUDA. Set `warp.config.standard_min_max = False` to restore the historical
+  asymmetric `a<b?a:b` behavior as a temporary workaround if a kernel relies
+  on it ([GH-1376](https://github.com/NVIDIA/warp/issues/1376)).
 
 ### Fixed
 
