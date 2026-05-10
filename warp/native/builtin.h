@@ -585,8 +585,12 @@ template <typename T> CUDA_CALLABLE inline void adj_float64(T x, T& adj_x, float
 // wp::min / wp::max / wp::clamp / wp::atomic_min / wp::atomic_max. The
 // corresponding Warp builtins emit one or the other from their dispatch_func
 // based on `wp.config.standard_min_max`.
-struct nan_propagate_t { };  // current Warp behavior: a<b?a:b (asymmetric in NaN)
-struct nan_as_missing_t { };  // C fmin/fmax behavior (NaN-as-missing, symmetric)
+struct nan_propagate_t {
+    static constexpr bool nan_as_missing = false;
+};  // current Warp behavior: a<b?a:b (asymmetric in NaN)
+struct nan_as_missing_t {
+    static constexpr bool nan_as_missing = true;
+};  // C fmin/fmax behavior (NaN-as-missing, symmetric)
 
 // basic ops for integer types
 #define DECLARE_INT_OPS(T) \
@@ -746,14 +750,18 @@ inline CUDA_CALLABLE void print(double f) { printf("%g\n", f); }
 inline CUDA_CALLABLE T mul(T a, T b) { return a*b; } \
 inline CUDA_CALLABLE T add(T a, T b) { return a+b; } \
 inline CUDA_CALLABLE T sub(T a, T b) { return a-b; } \
-inline CUDA_CALLABLE T min_impl(T a, T b, nan_propagate_t) { return a<b?a:b; } \
-inline CUDA_CALLABLE T min_impl(T a, T b, nan_as_missing_t) { return _wp_native_fmin(a, b); } \
-inline CUDA_CALLABLE T max_impl(T a, T b, nan_propagate_t) { return a>b?a:b; } \
-inline CUDA_CALLABLE T max_impl(T a, T b, nan_as_missing_t) { return _wp_native_fmax(a, b); } \
 template <typename NanBehavior = nan_propagate_t> \
-inline CUDA_CALLABLE T min(T a, T b) { return min_impl(a, b, NanBehavior{}); } \
+inline CUDA_CALLABLE T min(T a, T b) \
+{ \
+    if constexpr (NanBehavior::nan_as_missing) return _wp_native_fmin(a, b); \
+    else                                       return a<b?a:b; \
+} \
 template <typename NanBehavior = nan_propagate_t> \
-inline CUDA_CALLABLE T max(T a, T b) { return max_impl(a, b, NanBehavior{}); } \
+inline CUDA_CALLABLE T max(T a, T b) \
+{ \
+    if constexpr (NanBehavior::nan_as_missing) return _wp_native_fmax(a, b); \
+    else                                       return a>b?a:b; \
+} \
 inline CUDA_CALLABLE T sign(T x) { return x < T(0) ? -1 : 1; } \
 inline CUDA_CALLABLE T step(T x) { return x < T(0) ? T(1) : T(0); }\
 inline CUDA_CALLABLE T nonzero(T x) { return x == T(0) ? T(0) : T(1); }\
@@ -769,38 +777,34 @@ inline CUDA_CALLABLE void adj_abs(T x, T& adj_x, T adj_ret) \
 inline CUDA_CALLABLE void adj_mul(T a, T b, T& adj_a, T& adj_b, T adj_ret) { adj_a += b*adj_ret; adj_b += a*adj_ret; } \
 inline CUDA_CALLABLE void adj_add(T a, T b, T& adj_a, T& adj_b, T adj_ret) { adj_a += adj_ret; adj_b += adj_ret; } \
 inline CUDA_CALLABLE void adj_sub(T a, T b, T& adj_a, T& adj_b, T adj_ret) { adj_a += adj_ret; adj_b -= adj_ret; } \
-inline CUDA_CALLABLE void adj_min_impl(T a, T b, T& adj_a, T& adj_b, T adj_ret, nan_propagate_t) \
-{ \
-    if (a < b) adj_a += adj_ret; \
-    else       adj_b += adj_ret; \
-} \
-inline CUDA_CALLABLE void adj_min_impl(T a, T b, T& adj_a, T& adj_b, T adj_ret, nan_as_missing_t) \
-{ \
-    /* Forward returns: NaN if both NaN; the non-NaN if exactly one is NaN; */ \
-    /* the smaller otherwise. Route gradient to the operand the forward picked. */ \
-    if (::isnan(float(a)))      adj_b += adj_ret; \
-    else if (::isnan(float(b))) adj_a += adj_ret; \
-    else if (a < b)             adj_a += adj_ret; \
-    else                        adj_b += adj_ret; \
-} \
 template <typename NanBehavior = nan_propagate_t> \
 inline CUDA_CALLABLE void adj_min(T a, T b, T& adj_a, T& adj_b, T adj_ret) \
-{ adj_min_impl(a, b, adj_a, adj_b, adj_ret, NanBehavior{}); } \
-inline CUDA_CALLABLE void adj_max_impl(T a, T b, T& adj_a, T& adj_b, T adj_ret, nan_propagate_t) \
 { \
-    if (a > b) adj_a += adj_ret; \
-    else       adj_b += adj_ret; \
-} \
-inline CUDA_CALLABLE void adj_max_impl(T a, T b, T& adj_a, T& adj_b, T adj_ret, nan_as_missing_t) \
-{ \
-    if (::isnan(float(a)))      adj_b += adj_ret; \
-    else if (::isnan(float(b))) adj_a += adj_ret; \
-    else if (a > b)             adj_a += adj_ret; \
-    else                        adj_b += adj_ret; \
+    if constexpr (NanBehavior::nan_as_missing) { \
+        /* Forward returns: NaN if both NaN; the non-NaN if exactly one is NaN; */ \
+        /* the smaller otherwise. Route gradient to the operand the forward picked. */ \
+        if (::isnan(float(a)))      adj_b += adj_ret; \
+        else if (::isnan(float(b))) adj_a += adj_ret; \
+        else if (a < b)             adj_a += adj_ret; \
+        else                        adj_b += adj_ret; \
+    } else { \
+        if (a < b) adj_a += adj_ret; \
+        else       adj_b += adj_ret; \
+    } \
 } \
 template <typename NanBehavior = nan_propagate_t> \
 inline CUDA_CALLABLE void adj_max(T a, T b, T& adj_a, T& adj_b, T adj_ret) \
-{ adj_max_impl(a, b, adj_a, adj_b, adj_ret, NanBehavior{}); } \
+{ \
+    if constexpr (NanBehavior::nan_as_missing) { \
+        if (::isnan(float(a)))      adj_b += adj_ret; \
+        else if (::isnan(float(b))) adj_a += adj_ret; \
+        else if (a > b)             adj_a += adj_ret; \
+        else                        adj_b += adj_ret; \
+    } else { \
+        if (a > b) adj_a += adj_ret; \
+        else       adj_b += adj_ret; \
+    } \
+} \
 inline CUDA_CALLABLE void adj_floordiv(T a, T b, T& adj_a, T& adj_b, T adj_ret) { } \
 inline CUDA_CALLABLE void adj_mod(T a, T b, T& adj_a, T& adj_b, T adj_ret){ adj_a += adj_ret; }\
 inline CUDA_CALLABLE void adj_sign(T x, T adj_x, T& adj_ret) { }\
@@ -818,26 +822,24 @@ inline CUDA_CALLABLE void adj_copysign(T x, T y, T& adj_x, T& adj_y, T adj_ret) 
 } \
 inline CUDA_CALLABLE void adj_step(T x, T& adj_x, T adj_ret) { }\
 inline CUDA_CALLABLE void adj_nonzero(T x, T& adj_x, T adj_ret) { }\
-inline CUDA_CALLABLE void adj_clamp_impl(T x, T a, T b, T& adj_x, T& adj_a, T& adj_b, T adj_ret, nan_propagate_t)\
-{\
-    if (x < a)      adj_a += adj_ret;\
-    else if (x > b) adj_b += adj_ret;\
-    else            adj_x += adj_ret;\
-}\
-inline CUDA_CALLABLE void adj_clamp_impl(T x, T a, T b, T& adj_x, T& adj_a, T& adj_b, T adj_ret, nan_as_missing_t)\
-{\
-    /* Forward expands to min<.>(max<.>(a, x), b). Apply the chain rule via */\
-    /* the already-correct adj_min_impl / adj_max_impl: the routing handles */\
-    /* every NaN combination consistently (e.g. when x is NaN the output    */\
-    /* equals min(a, b) and the gradient flows to whichever bound won).     */\
-    T m = max_impl(a, x, nan_as_missing_t{});\
-    T adj_m = T(0);\
-    adj_min_impl(m, b, adj_m, adj_b, adj_ret, nan_as_missing_t{});\
-    adj_max_impl(a, x, adj_a, adj_x, adj_m, nan_as_missing_t{});\
-}\
 template <typename NanBehavior = nan_propagate_t> \
 inline CUDA_CALLABLE void adj_clamp(T x, T a, T b, T& adj_x, T& adj_a, T& adj_b, T adj_ret)\
-{ adj_clamp_impl(x, a, b, adj_x, adj_a, adj_b, adj_ret, NanBehavior{}); }\
+{\
+    if constexpr (NanBehavior::nan_as_missing) {\
+        /* Forward expands to min<.>(max<.>(a, x), b). Apply the chain rule via */\
+        /* the already-correct adj_min / adj_max: the routing handles every NaN */\
+        /* combination consistently (e.g. when x is NaN the output equals       */\
+        /* min(a, b) and the gradient flows to whichever bound won).            */\
+        T m = max<NanBehavior>(a, x);\
+        T adj_m = T(0);\
+        adj_min<NanBehavior>(m, b, adj_m, adj_b, adj_ret);\
+        adj_max<NanBehavior>(a, x, adj_a, adj_x, adj_m);\
+    } else {\
+        if (x < a)      adj_a += adj_ret;\
+        else if (x > b) adj_b += adj_ret;\
+        else            adj_x += adj_ret;\
+    }\
+}\
 inline CUDA_CALLABLE T div(T a, T b)\
 {\
     DO_IF_FPCHECK(\
@@ -2167,16 +2169,20 @@ template <> inline CUDA_CALLABLE float64 atomic_add(float64* buf, float64 value)
 // nan_as_missing_t, skip the pre-loop guard so atomic_min/max behaves like
 // the non-atomic counterpart; the in-loop bit-equality check makes CAS a
 // no-op when the value would not change.
-template <typename T> inline CUDA_CALLABLE bool _atomic_min_pre_guard(T val, T old, nan_propagate_t)
+template <typename NanBehavior, typename T> inline CUDA_CALLABLE bool _atomic_min_pre_guard(T val, T old)
 {
-    return val < old;
+    if constexpr (NanBehavior::nan_as_missing)
+        return true;
+    else
+        return val < old;
 }
-template <typename T> inline CUDA_CALLABLE bool _atomic_min_pre_guard(T val, T old, nan_as_missing_t) { return true; }
-template <typename T> inline CUDA_CALLABLE bool _atomic_max_pre_guard(T val, T old, nan_propagate_t)
+template <typename NanBehavior, typename T> inline CUDA_CALLABLE bool _atomic_max_pre_guard(T val, T old)
 {
-    return val > old;
+    if constexpr (NanBehavior::nan_as_missing)
+        return true;
+    else
+        return val > old;
 }
-template <typename T> inline CUDA_CALLABLE bool _atomic_max_pre_guard(T val, T old, nan_as_missing_t) { return true; }
 
 template <typename NanBehavior = nan_propagate_t, typename T> inline CUDA_CALLABLE T atomic_min(T* address, T val)
 {
@@ -2198,7 +2204,7 @@ template <typename NanBehavior = nan_propagate_t> inline CUDA_CALLABLE float ato
     int old = *address_as_i;
     int assumed;
 
-    if (_atomic_min_pre_guard(val, __int_as_float(old), NanBehavior {})) {
+    if (_atomic_min_pre_guard<NanBehavior>(val, __int_as_float(old))) {
         do {
             assumed = old;
             int min_as_i = __float_as_int(min<NanBehavior>(__int_as_float(assumed), val));
@@ -2234,7 +2240,7 @@ template <typename NanBehavior = nan_propagate_t> inline CUDA_CALLABLE double at
     unsigned long long old = *address_as_ull;
     unsigned long long assumed;
 
-    if (_atomic_min_pre_guard(val, __longlong_as_double(old), NanBehavior {})) {
+    if (_atomic_min_pre_guard<NanBehavior>(val, __longlong_as_double(old))) {
         do {
             assumed = old;
             unsigned long long min_as_ull = __double_as_longlong(min<NanBehavior>(__longlong_as_double(assumed), val));
@@ -2270,7 +2276,7 @@ template <typename NanBehavior = nan_propagate_t> inline CUDA_CALLABLE bfloat16 
     float val_f = bfloat16_to_float(val);
     bfloat16 old_bf16;
     old_bf16.u = old_val;
-    if (_atomic_min_pre_guard(val_f, bfloat16_to_float(old_bf16), NanBehavior {})) {
+    if (_atomic_min_pre_guard<NanBehavior>(val_f, bfloat16_to_float(old_bf16))) {
         do {
             assumed = old_val;
             old_bf16.u = assumed;
@@ -2313,7 +2319,7 @@ template <typename NanBehavior = nan_propagate_t> inline CUDA_CALLABLE float ato
     int old = *address_as_i;
     int assumed;
 
-    if (_atomic_max_pre_guard(val, __int_as_float(old), NanBehavior {})) {
+    if (_atomic_max_pre_guard<NanBehavior>(val, __int_as_float(old))) {
         do {
             assumed = old;
             int max_as_i = __float_as_int(max<NanBehavior>(__int_as_float(assumed), val));
@@ -2341,7 +2347,7 @@ template <typename NanBehavior = nan_propagate_t> inline CUDA_CALLABLE double at
     unsigned long long old = *address_as_ull;
     unsigned long long assumed;
 
-    if (_atomic_max_pre_guard(val, __longlong_as_double(old), NanBehavior {})) {
+    if (_atomic_max_pre_guard<NanBehavior>(val, __longlong_as_double(old))) {
         do {
             assumed = old;
             unsigned long long max_as_ull = __double_as_longlong(max<NanBehavior>(__longlong_as_double(assumed), val));
@@ -2377,7 +2383,7 @@ template <typename NanBehavior = nan_propagate_t> inline CUDA_CALLABLE bfloat16 
     float val_f = bfloat16_to_float(val);
     bfloat16 old_bf16;
     old_bf16.u = old_val;
-    if (_atomic_max_pre_guard(val_f, bfloat16_to_float(old_bf16), NanBehavior {})) {
+    if (_atomic_max_pre_guard<NanBehavior>(val_f, bfloat16_to_float(old_bf16))) {
         do {
             assumed = old_val;
             old_bf16.u = assumed;
@@ -2414,24 +2420,16 @@ template <typename NanBehavior = nan_propagate_t> inline CUDA_CALLABLE bfloat16 
 //     finite cases; the explicit both-NaN branch covers the case where the
 //     forward CAS replaces an old NaN with `value`'s NaN payload, which
 //     `value == *addr` cannot detect.
-template <typename T>
-CUDA_CALLABLE inline void adj_atomic_minmax_impl(T* addr, T* adj_addr, const T& value, T& adj_value, nan_propagate_t)
-{
-    if (value == *addr)
-        adj_value += *adj_addr;
-}
-
-template <typename T>
-CUDA_CALLABLE inline void adj_atomic_minmax_impl(T* addr, T* adj_addr, const T& value, T& adj_value, nan_as_missing_t)
-{
-    if (value == *addr || (::isnan(float(value)) && ::isnan(float(*addr))))
-        adj_value += *adj_addr;
-}
-
 template <typename NanBehavior = nan_propagate_t, typename T>
 CUDA_CALLABLE inline void adj_atomic_minmax(T* addr, T* adj_addr, const T& value, T& adj_value)
 {
-    adj_atomic_minmax_impl(addr, adj_addr, value, adj_value, NanBehavior {});
+    if constexpr (NanBehavior::nan_as_missing) {
+        if (value == *addr || (::isnan(float(value)) && ::isnan(float(*addr))))
+            adj_value += *adj_addr;
+    } else {
+        if (value == *addr)
+            adj_value += *adj_addr;
+    }
 }
 
 template <typename T> inline CUDA_CALLABLE T atomic_cas(T* address, T compare, T val)
