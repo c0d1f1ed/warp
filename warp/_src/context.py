@@ -2403,13 +2403,22 @@ class ModuleBuilder:
         type_defines = "" if "bfloat16" in source else "#define WP_NO_BFLOAT16\n"
 
         # add headers
+        standard_min_max = 1 if self.options["standard_min_max"] else 0
         if device == "cpu":
             source = (
-                type_defines + warp._src.codegen.cpu_module_header.format(block_dim=self.options["block_dim"]) + source
+                type_defines
+                + warp._src.codegen.cpu_module_header.format(
+                    block_dim=self.options["block_dim"], standard_min_max=standard_min_max
+                )
+                + source
             )
         else:
             source = (
-                type_defines + warp._src.codegen.cuda_module_header.format(block_dim=self.options["block_dim"]) + source
+                type_defines
+                + warp._src.codegen.cuda_module_header.format(
+                    block_dim=self.options["block_dim"], standard_min_max=standard_min_max
+                )
+                + source
             )
 
         return source

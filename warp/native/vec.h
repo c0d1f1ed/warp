@@ -1251,12 +1251,21 @@ inline CUDA_CALLABLE Type min(vec_t<Length, Type> v)
 {
     Type ret = v[0];
     for (unsigned i = 1; i < Length; ++i) {
+#if defined(WP_STANDARD_MIN_MAX)
+#if WP_STANDARD_MIN_MAX
+        ret = min<NanBehavior>(ret, v[i]);
+#else
+        if (v[i] < ret)
+            ret = v[i];
+#endif
+#else
         if constexpr (NanBehavior::nan_as_missing) {
             ret = min<NanBehavior>(ret, v[i]);
         } else {
             if (v[i] < ret)
                 ret = v[i];
         }
+#endif
     }
     return ret;
 }
@@ -1266,12 +1275,21 @@ inline CUDA_CALLABLE Type max(vec_t<Length, Type> v)
 {
     Type ret = v[0];
     for (unsigned i = 1; i < Length; ++i) {
+#if defined(WP_STANDARD_MIN_MAX)
+#if WP_STANDARD_MIN_MAX
+        ret = max<NanBehavior>(ret, v[i]);
+#else
+        if (v[i] > ret)
+            ret = v[i];
+#endif
+#else
         if constexpr (NanBehavior::nan_as_missing) {
             ret = max<NanBehavior>(ret, v[i]);
         } else {
             if (v[i] > ret)
                 ret = v[i];
         }
+#endif
     }
     return ret;
 }
@@ -1305,6 +1323,24 @@ template <unsigned Length, typename Type> inline CUDA_CALLABLE unsigned argmax(v
 template <typename NanBehavior, unsigned Length, typename Type>
 inline CUDA_CALLABLE unsigned _argmin_impl(const vec_t<Length, Type>& v)
 {
+#if defined(WP_STANDARD_MIN_MAX)
+#if WP_STANDARD_MIN_MAX
+    unsigned ret = 0;
+    while (ret < Length && ::isnan(float(v[ret])))
+        ++ret;
+    if (ret == Length)
+        return 0;
+    for (unsigned i = ret + 1; i < Length; ++i) {
+        if (::isnan(float(v[i])))
+            continue;
+        if (v[i] < v[ret])
+            ret = i;
+    }
+    return ret;
+#else
+    return argmin(v);
+#endif
+#else
     if constexpr (NanBehavior::nan_as_missing) {
         unsigned ret = 0;
         while (ret < Length && ::isnan(float(v[ret])))
@@ -1321,11 +1357,30 @@ inline CUDA_CALLABLE unsigned _argmin_impl(const vec_t<Length, Type>& v)
     } else {
         return argmin(v);
     }
+#endif
 }
 
 template <typename NanBehavior, unsigned Length, typename Type>
 inline CUDA_CALLABLE unsigned _argmax_impl(const vec_t<Length, Type>& v)
 {
+#if defined(WP_STANDARD_MIN_MAX)
+#if WP_STANDARD_MIN_MAX
+    unsigned ret = 0;
+    while (ret < Length && ::isnan(float(v[ret])))
+        ++ret;
+    if (ret == Length)
+        return 0;
+    for (unsigned i = ret + 1; i < Length; ++i) {
+        if (::isnan(float(v[i])))
+            continue;
+        if (v[i] > v[ret])
+            ret = i;
+    }
+    return ret;
+#else
+    return argmax(v);
+#endif
+#else
     if constexpr (NanBehavior::nan_as_missing) {
         unsigned ret = 0;
         while (ret < Length && ::isnan(float(v[ret])))
@@ -1342,6 +1397,7 @@ inline CUDA_CALLABLE unsigned _argmax_impl(const vec_t<Length, Type>& v)
     } else {
         return argmax(v);
     }
+#endif
 }
 
 template <unsigned Length, typename Type> inline CUDA_CALLABLE vec_t<Length, Type> abs(vec_t<Length, Type> v)

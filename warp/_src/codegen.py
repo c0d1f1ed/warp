@@ -4447,6 +4447,7 @@ class Adjoint:
 
 cpu_module_header = """
 #define WP_TILE_BLOCK_DIM {block_dim}
+#define WP_STANDARD_MIN_MAX {standard_min_max}
 #define WP_NO_CRT
 #include "builtin.h"
 
@@ -4468,6 +4469,7 @@ cpu_module_header = """
 
 cuda_module_header = """
 #define WP_TILE_BLOCK_DIM {block_dim}
+#define WP_STANDARD_MIN_MAX {standard_min_max}
 #define WP_NO_CRT
 #include "builtin.h"
 
