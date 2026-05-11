@@ -607,7 +607,6 @@ template <typename NanBehavior = nan_propagate_t> \
 inline CUDA_CALLABLE T clamp(T x, T a, T b) { return min<NanBehavior>(max<NanBehavior>(a, x), b); } \
 inline CUDA_CALLABLE T floordiv(T a, T b) { return a/b; } \
 inline CUDA_CALLABLE T nonzero(T x) { return x == T(0) ? T(0) : T(1); } \
-inline CUDA_CALLABLE T sqrt(T x) { return 0; } \
 inline CUDA_CALLABLE T bit_and(T a, T b) { return a&b; } \
 inline CUDA_CALLABLE T bit_or(T a, T b) { return a|b; } \
 inline CUDA_CALLABLE T bit_xor(T a, T b) { return a^b; } \
@@ -632,7 +631,6 @@ inline CUDA_CALLABLE void adj_clamp(T x, T a, T b, T& adj_x, T& adj_a, T& adj_b,
 inline CUDA_CALLABLE void adj_floordiv(T a, T b, T& adj_a, T& adj_b, T adj_ret) { } \
 inline CUDA_CALLABLE void adj_step(T x, T& adj_x, T adj_ret) { } \
 inline CUDA_CALLABLE void adj_nonzero(T x, T& adj_x, T adj_ret) { } \
-inline CUDA_CALLABLE void adj_sqrt(T x, T adj_x, T& adj_ret) { } \
 inline CUDA_CALLABLE void adj_bit_and(T a, T b, T& adj_a, T& adj_b, T adj_ret) { } \
 inline CUDA_CALLABLE void adj_bit_or(T a, T b, T& adj_a, T& adj_b, T adj_ret) { } \
 inline CUDA_CALLABLE void adj_bit_xor(T a, T b, T& adj_a, T& adj_b, T adj_ret) { } \
