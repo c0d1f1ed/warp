@@ -716,14 +716,49 @@ inline CUDA_CALLABLE half _wp_native_fmax(half a, half b) { return half(::fmaxf(
 inline CUDA_CALLABLE bfloat16 _wp_native_fmax(bfloat16 a, bfloat16 b) { return bfloat16(::fmaxf(float(a), float(b))); }
 #endif
 #else
-template <typename T> inline CUDA_CALLABLE T _wp_native_fmin(T a, T b)
+// CPU path: concrete per-type overloads, intentionally NO `template <typename
+// T>` fallback. With a template fallback in scope, Clang (< 21) considers it
+// as a candidate for every `_wp_native_fmin(a, b)` call inside DECLARE_FLOAT_OPS
+// even when a concrete overload is an exact match -- adding ~7ms (~10%) to JIT
+// compile time per kernel TU because the template parameter is dependent on
+// the surrounding DECLARE_FLOAT_OPS context. Concrete overloads only sidesteps
+// this; LLVM 21+ would resolve it via P3606R0 perfect-match candidate elision.
+inline CUDA_CALLABLE float _wp_native_fmin(float a, float b)
+{
+    return ::isnan(a) ? b : (::isnan(b) ? a : (a < b ? a : b));
+}
+inline CUDA_CALLABLE double _wp_native_fmin(double a, double b)
+{
+    return ::isnan(a) ? b : (::isnan(b) ? a : (a < b ? a : b));
+}
+inline CUDA_CALLABLE half _wp_native_fmin(half a, half b)
 {
     return ::isnan(float(a)) ? b : (::isnan(float(b)) ? a : (a < b ? a : b));
 }
-template <typename T> inline CUDA_CALLABLE T _wp_native_fmax(T a, T b)
+#ifndef WP_NO_BFLOAT16
+inline CUDA_CALLABLE bfloat16 _wp_native_fmin(bfloat16 a, bfloat16 b)
+{
+    return ::isnan(float(a)) ? b : (::isnan(float(b)) ? a : (a < b ? a : b));
+}
+#endif
+inline CUDA_CALLABLE float _wp_native_fmax(float a, float b)
+{
+    return ::isnan(a) ? b : (::isnan(b) ? a : (a > b ? a : b));
+}
+inline CUDA_CALLABLE double _wp_native_fmax(double a, double b)
+{
+    return ::isnan(a) ? b : (::isnan(b) ? a : (a > b ? a : b));
+}
+inline CUDA_CALLABLE half _wp_native_fmax(half a, half b)
 {
     return ::isnan(float(a)) ? b : (::isnan(float(b)) ? a : (a > b ? a : b));
 }
+#ifndef WP_NO_BFLOAT16
+inline CUDA_CALLABLE bfloat16 _wp_native_fmax(bfloat16 a, bfloat16 b)
+{
+    return ::isnan(float(a)) ? b : (::isnan(float(b)) ? a : (a > b ? a : b));
+}
+#endif
 #endif
 
 // basic ops for float types
