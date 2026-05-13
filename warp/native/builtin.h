@@ -698,67 +698,63 @@ inline CUDA_CALLABLE void print(double f) { printf("%g\n", f); }
 
 // Native fmin/fmax helpers used by min/max/clamp on float types. C semantics:
 // returns the non-NaN argument when exactly one is NaN; NaN only when both are
-// NaN. CUDA exposes single-instruction fminf/fmin intrinsics; the CPU clang
-// JIT CRT does not, so we fall back to a portable isnan-based implementation.
-// half/bfloat16 round-trip through float losslessly because the result is
-// always one of the inputs.
-#ifdef __CUDA_ARCH__
-inline CUDA_CALLABLE float _wp_native_fmin(float a, float b) { return ::fminf(a, b); }
-inline CUDA_CALLABLE double _wp_native_fmin(double a, double b) { return ::fmin(a, b); }
-inline CUDA_CALLABLE half _wp_native_fmin(half a, half b) { return half(::fminf(float(a), float(b))); }
-#ifndef WP_NO_BFLOAT16
-inline CUDA_CALLABLE bfloat16 _wp_native_fmin(bfloat16 a, bfloat16 b) { return bfloat16(::fminf(float(a), float(b))); }
-#endif
-inline CUDA_CALLABLE float _wp_native_fmax(float a, float b) { return ::fmaxf(a, b); }
-inline CUDA_CALLABLE double _wp_native_fmax(double a, double b) { return ::fmax(a, b); }
-inline CUDA_CALLABLE half _wp_native_fmax(half a, half b) { return half(::fmaxf(float(a), float(b))); }
-#ifndef WP_NO_BFLOAT16
-inline CUDA_CALLABLE bfloat16 _wp_native_fmax(bfloat16 a, bfloat16 b) { return bfloat16(::fmaxf(float(a), float(b))); }
-#endif
-#else
-// CPU path: concrete per-type overloads, intentionally NO `template <typename
-// T>` fallback. With a template fallback in scope, Clang (< 21) considers it
-// as a candidate for every `_wp_native_fmin(a, b)` call inside DECLARE_FLOAT_OPS
-// even when a concrete overload is an exact match -- adding ~7ms (~10%) to JIT
-// compile time per kernel TU because the template parameter is dependent on
-// the surrounding DECLARE_FLOAT_OPS context. Concrete overloads only sidesteps
-// this; LLVM 21+ would resolve it via P3606R0 perfect-match candidate elision.
+// NaN. Lowers to a single-instruction intrinsic on CUDA (libdevice __nv_fminf).
+// On host, the ordered-compare + `b == b` form inlines on every compiler;
+// ::fminf, __builtin_fminf, and ::isnan are all slower (function call or
+// library dependency, depending on the toolchain). half/bfloat16 round-trip
+// through float losslessly because the result is always one of the inputs.
+//
+// Concrete per-type overloads, intentionally NO `template <typename T>`
+// fallback: with a template fallback in scope, Clang (< 21) considers it as a
+// candidate for every `_wp_native_fmin(a, b)` call inside DECLARE_FLOAT_OPS,
+// adding ~7ms (~10%) to JIT compile time per kernel TU. LLVM 21+ would
+// resolve it via P3606R0 perfect-match candidate elision.
 inline CUDA_CALLABLE float _wp_native_fmin(float a, float b)
 {
-    return ::isnan(a) ? b : (::isnan(b) ? a : (a < b ? a : b));
+#if defined(__CUDA_ARCH__)
+    return ::fminf(a, b);
+#else
+    return (a <= b) ? a : ((b == b) ? b : a);
+#endif
 }
 inline CUDA_CALLABLE double _wp_native_fmin(double a, double b)
 {
-    return ::isnan(a) ? b : (::isnan(b) ? a : (a < b ? a : b));
+#if defined(__CUDA_ARCH__)
+    return ::fmin(a, b);
+#else
+    return (a <= b) ? a : ((b == b) ? b : a);
+#endif
 }
-inline CUDA_CALLABLE half _wp_native_fmin(half a, half b)
-{
-    return ::isnan(float(a)) ? b : (::isnan(float(b)) ? a : (a < b ? a : b));
-}
+inline CUDA_CALLABLE half _wp_native_fmin(half a, half b) { return half(_wp_native_fmin(float(a), float(b))); }
 #ifndef WP_NO_BFLOAT16
 inline CUDA_CALLABLE bfloat16 _wp_native_fmin(bfloat16 a, bfloat16 b)
 {
-    return ::isnan(float(a)) ? b : (::isnan(float(b)) ? a : (a < b ? a : b));
+    return bfloat16(_wp_native_fmin(float(a), float(b)));
 }
 #endif
+
 inline CUDA_CALLABLE float _wp_native_fmax(float a, float b)
 {
-    return ::isnan(a) ? b : (::isnan(b) ? a : (a > b ? a : b));
+#if defined(__CUDA_ARCH__)
+    return ::fmaxf(a, b);
+#else
+    return (a >= b) ? a : ((b == b) ? b : a);
+#endif
 }
 inline CUDA_CALLABLE double _wp_native_fmax(double a, double b)
 {
-    return ::isnan(a) ? b : (::isnan(b) ? a : (a > b ? a : b));
+#if defined(__CUDA_ARCH__)
+    return ::fmax(a, b);
+#else
+    return (a >= b) ? a : ((b == b) ? b : a);
+#endif
 }
-inline CUDA_CALLABLE half _wp_native_fmax(half a, half b)
-{
-    return ::isnan(float(a)) ? b : (::isnan(float(b)) ? a : (a > b ? a : b));
-}
+inline CUDA_CALLABLE half _wp_native_fmax(half a, half b) { return half(_wp_native_fmax(float(a), float(b))); }
 #ifndef WP_NO_BFLOAT16
 inline CUDA_CALLABLE bfloat16 _wp_native_fmax(bfloat16 a, bfloat16 b)
 {
-    return ::isnan(float(a)) ? b : (::isnan(float(b)) ? a : (a > b ? a : b));
+    return bfloat16(_wp_native_fmax(float(a), float(b)));
 }
-#endif
 #endif
 
 // basic ops for float types
@@ -875,9 +871,7 @@ inline CUDA_CALLABLE void adj_isfinite(const T&, T&, bool) { }
 // because adj_copysign uses it for sign-bit-aware comparison.
 inline CUDA_CALLABLE float copysign(float x, float y)
 {
-#ifdef __CUDA_ARCH__
-    return ::copysignf(x, y);
-#elif defined(__GNUC__) || defined(__clang__)
+#if !defined(__CUDA_ARCH__) && (defined(__GNUC__) || defined(__clang__))
     return __builtin_copysignf(x, y);
 #else
     return ::copysignf(x, y);
@@ -885,9 +879,7 @@ inline CUDA_CALLABLE float copysign(float x, float y)
 }
 inline CUDA_CALLABLE double copysign(double x, double y)
 {
-#ifdef __CUDA_ARCH__
-    return ::copysign(x, y);
-#elif defined(__GNUC__) || defined(__clang__)
+#if !defined(__CUDA_ARCH__) && (defined(__GNUC__) || defined(__clang__))
     return __builtin_copysign(x, y);
 #else
     return ::copysign(x, y);
