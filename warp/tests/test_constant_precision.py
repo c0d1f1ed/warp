@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for constant precision preservation (GH-485).
+"""Tests for constant precision preservation (GH-1297).
 
 This module tests that floating-point literal constants maintain their precision
 when explicitly cast to higher precision types like wp.float64.
@@ -489,31 +489,36 @@ def test_func_overload_resolution_kernel(result: wp.array(dtype=wp.float64)):
 
 
 @wp.func
-def _user_identity_f32(x: wp.float32) -> wp.float32:
+def _user_identity(x: wp.float32) -> wp.float32:
     return x
 
 
 @wp.func
-def _user_identity_f64(x: wp.float64) -> wp.float64:
+def _user_identity(x: wp.float64) -> wp.float64:
     return x
 
 
 @wp.kernel
-def test_func_overload_default_kernel(result_f32: wp.array(dtype=wp.float32)):
-    # Bare literal should resolve to float32 overload (default)
-    result_f32[0] = _user_identity_f32(1.5)
+def test_func_overload_default_kernel(result_f64: wp.array(dtype=wp.float64)):
+    # Bare literal should resolve to float64 overload (R14) when both
+    # float32 and float64 overloads of _user_identity exist.
+    # Use a value where float32 truncation is detectable.
+    result_f64[0] = _user_identity(1.00000005)
 
 
 @wp.kernel
 def test_builtin_default_resolution_kernel(
-    result_f32: wp.array(dtype=wp.float32), result_f64: wp.array(dtype=wp.float64)
+    result_weak: wp.array(dtype=wp.float64), result_strong: wp.array(dtype=wp.float64)
 ):
-    # Bare literal sin should use float32 (default resolution)
-    a = wp.sin(1.0)
-    result_f32[0] = a
-    # Explicit float64 should use float64
-    b = wp.sin(wp.float64(1.0))
-    result_f64[0] = b
+    # Bare literal: weak float selects float64 overload (R5/R13),
+    # result is weakly typed and adapts to the float64 array context.
+    # Use exp(1.00000005) — the difference between float32 and float64
+    # computation is detectable.
+    a = wp.exp(1.00000005)
+    result_weak[0] = a
+    # Explicit float64 should also use float64
+    b = wp.exp(wp.float64(1.00000005))
+    result_strong[0] = b
 
 
 @wp.kernel
@@ -1042,24 +1047,30 @@ def test_func_overload_resolution(test, device):
 
 
 def test_func_overload_default(test, device):
-    """Verify bare literal resolves to float32 overload (default) when both f32/f64 exist."""
-    result = wp.zeros(1, dtype=wp.float32, device=device)
+    """Verify bare literal resolves to float64 overload (R14) when both f32/f64 exist."""
+    result = wp.zeros(1, dtype=wp.float64, device=device)
     wp.launch(test_func_overload_default_kernel, dim=1, inputs=[result], device=device)
-    test.assertEqual(float(result.numpy()[0]), 1.5)
+
+    # The float64 overload preserves the literal's full precision
+    test.assertEqual(float(result.numpy()[0]), 1.00000005)
+    # Verify this differs from what the float32 overload would produce
+    test.assertNotEqual(float(result.numpy()[0]), float(np.float32(1.00000005)))
 
 
 def test_builtin_default_resolution(test, device):
-    """Verify wp.sin(1.0) with bare literal defaults to float32."""
-    result_f32 = wp.zeros(1, dtype=wp.float32, device=device)
-    result_f64 = wp.zeros(1, dtype=wp.float64, device=device)
-    wp.launch(test_builtin_default_resolution_kernel, dim=1, inputs=[result_f32, result_f64], device=device)
+    """Verify wp.exp(1.00000005) with bare literal computes in float64 (R5/R13)."""
+    result_weak = wp.zeros(1, dtype=wp.float64, device=device)
+    result_strong = wp.zeros(1, dtype=wp.float64, device=device)
+    wp.launch(test_builtin_default_resolution_kernel, dim=1, inputs=[result_weak, result_strong], device=device)
 
-    # Bare literal: sin(float32(1.0))
-    expected_f32 = float(np.float32(np.sin(np.float32(1.0))))
-    test.assertAlmostEqual(float(result_f32.numpy()[0]), expected_f32, places=6)
-    # Explicit float64: sin(float64(1.0))
-    expected_f64 = np.sin(1.0)
-    test.assertAlmostEqual(float(result_f64.numpy()[0]), expected_f64, places=14)
+    # Both bare literal and explicit float64 should compute in float64
+    expected_f64 = np.exp(1.00000005)
+    test.assertAlmostEqual(float(result_weak.numpy()[0]), expected_f64, places=14)
+    test.assertAlmostEqual(float(result_strong.numpy()[0]), expected_f64, places=14)
+
+    # Verify float64 result differs from what float32 computation would give
+    expected_f32 = float(np.float64(np.exp(np.float32(1.00000005))))
+    test.assertNotAlmostEqual(float(result_weak.numpy()[0]), expected_f32, places=14)
 
 
 def test_array_store_literal(test, device):
