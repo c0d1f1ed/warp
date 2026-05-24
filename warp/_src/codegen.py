@@ -966,7 +966,7 @@ def func_match_args(func, arg_types, kwarg_types):
         if (
             is_array(func_arg_type)
             and (issubclass(func_concrete, bound_concrete) or issubclass(bound_concrete, func_concrete))
-            and types_equal_generic(func_arg_type.dtype, bound_arg_type_stripped.dtype, match_generic=True)
+            and types_equal_generic(func_arg_type.dtype, bound_arg_type_stripped.dtype, match_generic_type=True)
         ):
             continue
 

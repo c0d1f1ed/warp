@@ -2600,7 +2600,7 @@ def is_slice(x) -> builtins.bool:
     return isinstance(x, slice_t)
 
 
-def scalars_equal_generic(a, b, match_generic=True):
+def scalars_equal_generic(a, b, match_generic_type=True):
     # Convert bool to canonical Warp type.
     # Note: Python's float and int are NOT converted — they represent weakly-typed
     # literals that adapt their precision to context (GH-485).
@@ -2610,7 +2610,7 @@ def scalars_equal_generic(a, b, match_generic=True):
     if b is builtins.bool:
         b = bool
 
-    if match_generic:
+    if match_generic_type:
         if a is Any or b is Any:
             return True
         if a is Int and (b in int_types or is_weak_int(b)):
@@ -2635,12 +2635,12 @@ def scalars_equal_generic(a, b, match_generic=True):
     # Weak int is canonically equivalent to int32 in all contexts — there are
     # no specialized int overloads that would cause precision issues.
     # Weak float is only equivalent to float32 in structural equality (not
-    # match_generic) to prevent specialized overloads like pow(float32, float32)
+    # match_generic_type) to prevent specialized overloads like pow(float32, float32)
     # from capturing weak float args before the generic pow(Float, Float).
     if a is not b:
         if is_weak_int(a) or is_weak_int(b):
             return canonicalize_dtype(a) is canonicalize_dtype(b)
-        if not match_generic and (is_weak_float(a) or is_weak_float(b)):
+        if not match_generic_type and (is_weak_float(a) or is_weak_float(b)):
             return canonicalize_dtype(a) is canonicalize_dtype(b)
     return a is b
 
@@ -2658,8 +2658,8 @@ def seq_match_ellipsis(a, b) -> bool:
     return True
 
 
-def types_equal_generic(a, b, match_generic=True):
-    if match_generic:
+def types_equal_generic(a, b, match_generic_type=True):
+    if match_generic_type:
         a_is_seq = True
         a_is_tuple = True
         if is_tuple(a):
@@ -2702,7 +2702,7 @@ def types_equal_generic(a, b, match_generic=True):
                 return seq_match_ellipsis(b, a)
 
             return len(a) == len(b) and all(
-                types_equal_generic(x, y, match_generic=match_generic) for x, y in zip(a, b)
+                types_equal_generic(x, y, match_generic_type=match_generic_type) for x, y in zip(a, b)
             )
         elif a_is_seq or b_is_seq:
             # A sequence can only match to another sequence.
@@ -2724,34 +2724,34 @@ def types_equal_generic(a, b, match_generic=True):
             return False
 
         for p1, p2 in zip(a._wp_type_params_, b._wp_type_params_):
-            if not scalars_equal_generic(p1, p2, match_generic=match_generic):
+            if not scalars_equal_generic(p1, p2, match_generic_type=match_generic_type):
                 return False
 
         return True
 
     if is_array(a):
         return concrete_array_type(a) is concrete_array_type(b) and types_equal_generic(
-            a.dtype, b.dtype, match_generic=match_generic
+            a.dtype, b.dtype, match_generic_type=match_generic_type
         )
 
     if is_tile(a):
-        return type(a) is type(b) and types_equal_generic(a.dtype, b.dtype, match_generic=match_generic)
+        return type(a) is type(b) and types_equal_generic(a.dtype, b.dtype, match_generic_type=match_generic_type)
 
     if is_slice(a):
         return type(a) is type(b)
 
-    return scalars_equal_generic(a, b, match_generic=match_generic)
+    return scalars_equal_generic(a, b, match_generic_type=match_generic_type)
 
 
 def scalars_equal(a, b):
-    return scalars_equal_generic(a, b, match_generic=False)
+    return scalars_equal_generic(a, b, match_generic_type=False)
 
 
 def types_equal(a, b):
     """Return ``True`` if two Warp types are equal."""
     if a is b:
         return True
-    return types_equal_generic(a, b, match_generic=False)
+    return types_equal_generic(a, b, match_generic_type=False)
 
 
 def strides_from_shape(shape: tuple, dtype):
