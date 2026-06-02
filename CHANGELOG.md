@@ -234,6 +234,11 @@
 - Fix `Tape.record_scope_end()` to raise a clear error for unmatched
   scope ends and preserve nested non-empty tape visualization scopes
   ([GH-1515](https://github.com/NVIDIA/warp/issues/1515)).
+- Allocate host arrays at their exact requested size so AddressSanitizer reports
+  out-of-bounds accesses at the logical `wp.array` boundary instead of the
+  64-byte-aligned allocation. The POSIX path previously rounded the request up to
+  a multiple of the alignment, hiding overflows that landed in the padding
+  ([GH-1513](https://github.com/NVIDIA/warp/issues/1513)).
 
 ### Documentation
 
