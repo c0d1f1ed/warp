@@ -603,6 +603,38 @@ def main(argv: list[str] | None = None) -> int:
             if is_intel_mac:
                 print("Skipping kernel cache clearing on Intel Mac (binaries built for ARM64)")
         else:
+            # On Linux, ASan-instrumented .so files cannot be loaded into a process
+            # unless the ASan runtime is first in the link order. For dlopened
+            # libraries that means LD_PRELOAD'ing libasan before launching Python.
+            subprocess_env = os.environ.copy()
+            if args.sanitize == "address" and platform.system() == "Linux":
+                compiler = "clang++" if args.clang_build_toolchain else args.host_compiler
+                try:
+                    asan_lib = subprocess.run(
+                        [compiler, "-print-file-name=libasan.so"],
+                        capture_output=True,
+                        text=True,
+                        check=True,
+                    ).stdout.strip()
+                except (FileNotFoundError, subprocess.CalledProcessError) as e:
+                    print(f"Warning: could not query {compiler} for ASan runtime path: {e}")
+                    asan_lib = ""
+                if asan_lib and asan_lib != "libasan.so" and os.path.exists(asan_lib):
+                    existing = subprocess_env.get("LD_PRELOAD", "")
+                    subprocess_env["LD_PRELOAD"] = f"{asan_lib}:{existing}" if existing else asan_lib
+                else:
+                    print(
+                        f"Warning: could not locate libasan.so via {compiler}; "
+                        "kernel cache clear and diagnostics may fail to load warp.so"
+                    )
+                # Python/NumPy retain a number of allocations across interpreter shutdown
+                # that ASan would otherwise flag as leaks, making the subprocess exit
+                # non-zero. Disable leak detection only for these utility subprocesses.
+                existing_opts = subprocess_env.get("ASAN_OPTIONS", "")
+                subprocess_env["ASAN_OPTIONS"] = (
+                    f"{existing_opts},detect_leaks=0" if existing_opts else "detect_leaks=0"
+                )
+
             # Clear kernel cache in subprocess (ensures fresh import of updated config.py)
             print("Clearing kernel cache...")
             sys.stdout.flush()
@@ -615,6 +647,7 @@ def main(argv: list[str] | None = None) -> int:
                 ],
                 cwd=base_path,
                 check=False,
+                env=subprocess_env,
             )
             if result.returncode != 0:
                 print(f"Warning: Failed to clear kernel cache (exit code {result.returncode})")
@@ -632,6 +665,7 @@ def main(argv: list[str] | None = None) -> int:
                 ],
                 cwd=base_path,
                 check=False,
+                env=subprocess_env,
             )
     except Exception as e:
         print(f"Unable to clear kernel cache: {e}")
