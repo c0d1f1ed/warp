@@ -2896,6 +2896,9 @@ def _get_cpu_feature_set() -> frozenset[str]:
 # Cached CPU toolchain version — computed once after the native library is loaded.
 _cpu_toolchain_version_cache: str | None = None
 
+# Bump this when native LLVM defaults change generated CPU or LLVM-CUDA code.
+_LLVM_INLINING_POLICY_REVISION = 2
+
 
 def _get_cpu_toolchain_version() -> str:
     """Return the LLVM version used by the CPU compiler, or an empty string if unavailable.
@@ -2921,15 +2924,15 @@ def _get_cpu_target_hash(resolved_flags: str) -> str:
         resolved_flags: Resolved CPU compiler flags for the module.
 
     Returns:
-        An eight-character hash of the LLVM version and, for
-        ``-march=native``, host ISA features. Returns an empty string when
-        the LLVM native library is unavailable.
+        An eight-character hash of the LLVM inlining policy, LLVM version,
+        and, for ``-march=native``, host ISA features. Returns an empty
+        string when the LLVM native library is unavailable.
     """
     llvm_version = _get_cpu_toolchain_version()
     if not llvm_version:
         return ""
 
-    identity = ["warp-cpu-target-v1", f"llvm:{llvm_version}"]
+    identity = [f"warp-cpu-target-v{_LLVM_INLINING_POLICY_REVISION}", f"llvm:{llvm_version}"]
     if _uses_march_native(resolved_flags):
         features = ",".join(sorted(_get_cpu_feature_set()))
         identity.append(f"isa:{features}")
@@ -4479,11 +4482,12 @@ class Module:
         ``wp___main___0340cd1.sm90a.cubin`` when an arch suffix is active.
         It should be used to form a path.
 
-        For CPU targets, a short hash of the LLVM version is included in the
-        filename. When compiling with ``-march=native``, the hash also includes
-        the host CPU's ISA features (e.g. ``wp___main___0340cd1.cpu1a2b3c4d.o``).
-        This distinguishes incompatible CPU objects without affecting the shared
-        module directory and its CUDA caches.
+        For CPU targets, a short hash of the LLVM version and native inlining
+        policy is included in the filename. When compiling with
+        ``-march=native``, the hash also includes the host CPU's ISA features
+        (e.g. ``wp___main___0340cd1.cpu1a2b3c4d.o``). LLVM-CUDA binaries also
+        include the inlining policy revision. These filenames distinguish
+        incompatible binaries without changing the shared module directory.
         """
         module_name_short = self.get_module_identifier(block_dim=block_dim)
 
@@ -4495,6 +4499,9 @@ class Module:
             if cpu_target_hash:
                 return f"{module_name_short}.cpu{cpu_target_hash}.o"
             return f"{module_name_short}.o"
+
+        if warp.config.llvm_cuda:
+            module_name_short += f".llvminline{_LLVM_INLINING_POLICY_REVISION}"
 
         # For CUDA compilation, we must have an architecture.
         final_arch = output_arch

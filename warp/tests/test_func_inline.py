@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import re
+import struct
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,6 +18,57 @@ def module_source(kernel, device: str) -> str:
     """Generate the full module source, including @wp.func bodies, for a kernel's module."""
     options = kernel.module.resolve_options(wp.config) | kernel.options
     return ModuleBuilder(kernel.module, options).codegen(device)
+
+
+def defined_elf_function_names(data: bytes) -> set[str] | None:
+    """Read defined function symbols from an ELF64 CPU object, if applicable."""
+    if data[:4] != b"\x7fELF":
+        return None
+
+    if data[4] != 2:
+        raise ValueError("Expected an ELF64 CPU object")
+    if data[5] == 1:
+        byte_order = "<"
+    elif data[5] == 2:
+        byte_order = ">"
+    else:
+        raise ValueError("Unknown ELF byte order")
+
+    section_offset = struct.unpack_from(f"{byte_order}Q", data, 0x28)[0]
+    section_size, section_count = struct.unpack_from(f"{byte_order}HH", data, 0x3A)
+    sections = []
+    for index in range(section_count):
+        header_offset = section_offset + index * section_size
+        header = struct.unpack_from(f"{byte_order}IIQQQQIIQQ", data, header_offset)
+        sections.append(header)
+
+    names = set()
+    for header in sections:
+        section_type, symbols_offset, symbols_size, strings_index, entry_size = (
+            header[1],
+            header[4],
+            header[5],
+            header[6],
+            header[9],
+        )
+        if section_type != 2:  # SHT_SYMTAB
+            continue
+        if entry_size < 24:
+            raise ValueError("Invalid ELF64 symbol table entry size")
+
+        strings_header = sections[strings_index]
+        strings_offset = strings_header[4]
+        strings = data[strings_offset : strings_offset + strings_header[5]]
+        for offset in range(symbols_offset, symbols_offset + symbols_size, entry_size):
+            name_offset, info, _, section_index, _, _ = struct.unpack_from(f"{byte_order}IBBHQQ", data, offset)
+            if info & 0xF != 2 or section_index == 0:  # STT_FUNC, excluding undefined symbols
+                continue
+            name_end = strings.find(b"\0", name_offset)
+            if name_end < 0:
+                raise ValueError("Unterminated ELF symbol name")
+            names.add(strings[name_offset:name_end].decode("utf-8"))
+
+    return names
 
 
 @wp.func(inline=False)
@@ -38,6 +90,55 @@ def test_noinline_func_runs(test, device):
 
 
 class TestFuncInline(unittest.TestCase):
+    def _compile_cpu_inline_object(self, inline: bool, mode: str) -> bytes:
+        """Compile a CPU helper and return its native object for symbol inspection."""
+
+        @wp.func(inline=inline, module="unique")
+        def cpu_inline_helper(x: float) -> float:
+            return x * 2.0
+
+        @wp.kernel(enable_backward=False, module=cpu_inline_helper.module)
+        def apply_cpu_scale(values: wp.array[float]):
+            tid = wp.tid()
+            values[tid] = cpu_inline_helper(float(tid))
+
+        wp.set_module_options({"mode": mode, "cpu_compiler_flags": ""}, module=apply_cpu_scale.module)
+        with tempfile.TemporaryDirectory() as module_dir:
+            artifacts = wp.compile_aot_module(apply_cpu_scale.module, device="cpu", module_dir=module_dir)
+            objects = [path for path in artifacts if path.suffix == ".o"]
+            self.assertEqual(len(objects), 1)
+            return objects[0].read_bytes()
+
+    def test_noinline_honored_in_cpu_object(self):
+        """Keep an explicitly non-inlined helper at CPU -O2 and -O0."""
+        for mode in ("release", "debug"):
+            with self.subTest(mode=mode):
+                names = defined_elf_function_names(self._compile_cpu_inline_object(False, mode))
+                if names is None:
+                    self.skipTest("CPU object symbol inspection requires ELF")
+                self.assertTrue(
+                    any("__locals__apply_cpu_scale_" in name and name.endswith("_cpu_forward") for name in names)
+                )
+                self.assertTrue(
+                    any("__locals__cpu_inline_helper_" in name for name in names),
+                    f"inline=False helper was inlined away in CPU {mode} mode",
+                )
+
+    def test_forceinline_honored_in_cpu_object(self):
+        """Inline an explicitly forced helper at CPU -O2 and -O0."""
+        for mode in ("release", "debug"):
+            with self.subTest(mode=mode):
+                names = defined_elf_function_names(self._compile_cpu_inline_object(True, mode))
+                if names is None:
+                    self.skipTest("CPU object symbol inspection requires ELF")
+                self.assertTrue(
+                    any("__locals__apply_cpu_scale_" in name and name.endswith("_cpu_forward") for name in names)
+                )
+                self.assertFalse(
+                    any("__locals__cpu_inline_helper_" in name for name in names),
+                    f"inline=True helper was left out of line in CPU {mode} mode",
+                )
+
     def test_invalid_inline_hint_rejected(self):
         """Reject non-bool values for the inline hint."""
         for value in (1, 1.5, "yes"):

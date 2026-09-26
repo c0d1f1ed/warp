@@ -272,6 +272,8 @@ class TestOptions(unittest.TestCase):
             ):
                 module.options["cpu_compiler_flags"] = ""
                 name_llvm_22_1_8_portable = module._get_compile_output_name(device)
+                with patch("warp._src.context._LLVM_INLINING_POLICY_REVISION", 1):
+                    name_old_policy = module._get_compile_output_name(device)
 
                 module.options["cpu_compiler_flags"] = "-march=native"
                 name_llvm_22_1_8_native = module._get_compile_output_name(device)
@@ -282,6 +284,7 @@ class TestOptions(unittest.TestCase):
 
             self.assertNotEqual(name_llvm_22_1_8_portable, name_llvm_22_1_8_native)
             self.assertNotEqual(name_llvm_22_1_8_portable, name_llvm_22_1_9_portable)
+            self.assertNotEqual(name_llvm_22_1_8_portable, name_old_policy)
 
             for output_name in (
                 name_llvm_22_1_8_portable,
@@ -292,6 +295,38 @@ class TestOptions(unittest.TestCase):
                 self.assertRegex(output_name, r"\.cpu[0-9a-f]{8}\.o$")
         finally:
             module.options["cpu_compiler_flags"] = old_flags
+
+    def test_llvm_cuda_policy_output_name_differentiation(self):
+        """Give LLVM-CUDA binaries a new cache name when the native inlining policy changes."""
+        module = wp.get_module(__name__)
+        old_strip_hash = module.options["strip_hash"]
+        old_llvm_cuda = wp.config.llvm_cuda
+        try:
+            # A stripped module identifier cannot inherit the policy revision
+            # from its source hash, so the binary filename must carry it.
+            module.options["strip_hash"] = True
+            wp.config.llvm_cuda = False
+            nvrtc_ptx = module._get_compile_output_name(None, output_arch=80, use_ptx=True)
+            nvrtc_cubin = module._get_compile_output_name(None, output_arch=80, use_ptx=False)
+            metadata_name = module._get_meta_name()
+
+            wp.config.llvm_cuda = True
+            llvm_ptx = module._get_compile_output_name(None, output_arch=80, use_ptx=True)
+            llvm_cubin = module._get_compile_output_name(None, output_arch=80, use_ptx=False)
+            with patch("warp._src.context._LLVM_INLINING_POLICY_REVISION", 1):
+                old_llvm_ptx = module._get_compile_output_name(None, output_arch=80, use_ptx=True)
+
+            self.assertEqual(metadata_name, module._get_meta_name())
+            self.assertTrue(nvrtc_ptx.endswith(".sm80.ptx"))
+            self.assertTrue(nvrtc_cubin.endswith(".sm80.cubin"))
+            self.assertNotIn(".llvminline", nvrtc_ptx)
+            self.assertIn(".llvminline2.sm80.ptx", llvm_ptx)
+            self.assertIn(".llvminline2.sm80.cubin", llvm_cubin)
+            self.assertNotEqual(llvm_ptx, nvrtc_ptx)
+            self.assertNotEqual(llvm_ptx, old_llvm_ptx)
+        finally:
+            wp.config.llvm_cuda = old_llvm_cuda
+            module.options["strip_hash"] = old_strip_hash
 
     def test_cpu_isa_aot_warning(self):
         """Verify that compile_aot_module for CPU with -march=native must emit a portability warning."""

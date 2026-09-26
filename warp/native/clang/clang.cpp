@@ -50,6 +50,8 @@
 #include <llvm/Linker/Linker.h>
 #include <llvm/MC/TargetRegistry.h>
 #include <llvm/PassRegistry.h>
+#include <llvm/Support/CommandLine.h>
+#include <llvm/Support/ErrorHandling.h>
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/Target/TargetMachine.h>
 #if LLVM_VERSION_MAJOR >= 16
@@ -119,6 +121,29 @@ static void initialize_llvm()
         llvm::InitializeAllTargets();
         llvm::InitializeAllTargetMCs();
         llvm::InitializeAllAsmPrinters();
+
+        // Raise finite LLVM inlining budgets so generated helpers can be
+        // inlined and by-value struct copies can be eliminated. These are
+        // independent thresholds, even though they currently use the same value.
+        auto& llvm_options = llvm::cl::getRegisteredOptions();
+        const auto inline_threshold = llvm_options.find("inline-threshold");
+        if (inline_threshold == llvm_options.end()) {
+            llvm::report_fatal_error("Failed to find the LLVM inline threshold");
+        }
+        const bool inline_threshold_failed = inline_threshold->second->addOccurrence(0, "inline-threshold", "3000");
+        if (inline_threshold_failed) {
+            llvm::report_fatal_error("Failed to configure the LLVM inline threshold");
+        }
+
+        const auto inline_cold_callsite_threshold = llvm_options.find("inline-cold-callsite-threshold");
+        if (inline_cold_callsite_threshold == llvm_options.end()) {
+            llvm::report_fatal_error("Failed to find the LLVM cold-callsite inline threshold");
+        }
+        const bool inline_cold_callsite_threshold_failed
+            = inline_cold_callsite_threshold->second->addOccurrence(0, "inline-cold-callsite-threshold", "3000");
+        if (inline_cold_callsite_threshold_failed) {
+            llvm::report_fatal_error("Failed to configure the LLVM cold-callsite inline threshold");
+        }
     });
 }
 
