@@ -181,6 +181,7 @@ Arrays
    :nosignatures:
    :toctree: _generated
 
+   ScopedWarpFunctionDisable
    array
    array1d
    array2d

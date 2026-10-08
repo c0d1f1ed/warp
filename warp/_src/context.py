@@ -71,6 +71,7 @@ import warp._src.codegen
 import warp._src.module_registry
 import warp.config
 from warp._src.codegen import WarpCodegenError, WarpCodegenTypeError, _codegen_lock, synchronized
+from warp._src.function_dispatch import get_warp_function_callsite, warp_function
 from warp._src.logger import get_logger, log_debug, log_error, log_info, log_warning
 from warp._src.texture import Texture1D, Texture2D, Texture3D, texture1d_t, texture2d_t, texture3d_t
 from warp._src.types import LAUNCH_MAX_DIMS, Array, LaunchBounds, array_t, launch_bounds_t, type_repr
@@ -5384,6 +5385,7 @@ def _capture_alloc_tag():
         return "(python)"
 
     array_info = ""
+    callsite = get_warp_function_callsite()
     while frame is not None:
         co = frame.f_code
         if not array_info and co.co_name == "__init__" and warp._src.types.is_array(frame.f_locals.get("self")):
@@ -5402,11 +5404,12 @@ def _capture_alloc_tag():
 
         package = (frame.f_globals.get("__package__") or "").split(".")
         if package[0] != "warp" or (len(package) > 1 and package[1] == "examples"):
+            filename, lineno, function = callsite or (co.co_filename, frame.f_lineno, co.co_name)
             parts = []
             if array_info:
                 parts.append(array_info)
-            parts.append(f"{os.path.basename(co.co_filename)}:{frame.f_lineno}")
-            parts.append(f"{co.co_name}()")
+            parts.append(f"{os.path.basename(filename)}:{lineno}")
+            parts.append(f"{function}()")
             return " : ".join(parts)
 
         frame = frame.f_back
@@ -10165,6 +10168,7 @@ def zeros(
     return arr
 
 
+@warp_function
 def zeros_like(
     src: Array,
     device: DeviceLike = None,
@@ -10227,6 +10231,7 @@ def ones(
     )
 
 
+@warp_function
 def ones_like(
     src: Array,
     device: DeviceLike = None,
@@ -10326,6 +10331,7 @@ def full(
     return arr
 
 
+@warp_function
 def full_like(
     src: Array,
     value: Any,
@@ -10355,6 +10361,7 @@ def full_like(
     return arr
 
 
+@warp_function
 def clone(
     src: warp.array,
     device: DeviceLike = None,
@@ -10434,6 +10441,7 @@ def empty(
     return arr
 
 
+@warp_function
 def empty_like(
     src: Array,
     device: DeviceLike = None,
@@ -10480,6 +10488,7 @@ def empty_like(
     return arr
 
 
+@warp_function
 def from_numpy(
     arr: np.ndarray,
     dtype: type | None = None,
@@ -11809,6 +11818,7 @@ def _resolve_launch_block_dim(device: Device, block_dim: int | None) -> int:
     return block_dim
 
 
+@warp_function(sequence_parameters=("inputs", "outputs", "adj_inputs", "adj_outputs"))
 def launch(
     kernel,
     dim: int | Sequence[int],
@@ -12216,8 +12226,11 @@ def launch(
     # record on tape if one is active
     if runtime.tape and record_tape:
         # record file, lineno, func as metadata
-        frame = inspect.currentframe().f_back
-        caller = {"file": frame.f_code.co_filename, "lineno": frame.f_lineno, "func": frame.f_code.co_name}
+        callsite = get_warp_function_callsite()
+        if callsite is None:
+            frame = inspect.currentframe().f_back
+            callsite = frame.f_code.co_filename, frame.f_lineno, frame.f_code.co_name
+        caller = {"file": callsite[0], "lineno": callsite[1], "func": callsite[2]}
         runtime.tape.record_launch(
             kernel, dim, max_blocks, inputs, outputs, device, block_dim, metadata={"caller": caller}
         )
@@ -12227,6 +12240,7 @@ def launch(
             runtime.tape._check_kernel_array_access(kernel, fwd_args)
 
 
+@warp_function(sequence_parameters=("inputs", "outputs", "adj_inputs", "adj_outputs"), signature=launch)
 def launch_tiled(*args, **kwargs):
     """A helper method for launching a grid with an extra trailing dimension equal to the block size.
 
@@ -14955,6 +14969,9 @@ def _copy_caller_location() -> tuple[str, int] | tuple[None, None]:
     Used to attribute ``verify_autograd_array_access`` warnings to the user's
     call site; returns ``(None, None)`` if no such frame exists.
     """
+    callsite = get_warp_function_callsite()
+    if callsite is not None:
+        return callsite[:2]
     src_dir = os.path.dirname(__file__) + os.sep
     frame = sys._getframe(1)
     while frame is not None and frame.f_code.co_filename.startswith(src_dir):
@@ -14964,6 +14981,7 @@ def _copy_caller_location() -> tuple[str, int] | tuple[None, None]:
     return frame.f_code.co_filename, frame.f_lineno
 
 
+@warp_function
 def copy(
     dest: warp.array,
     src: warp.array,

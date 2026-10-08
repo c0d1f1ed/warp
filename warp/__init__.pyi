@@ -61,6 +61,7 @@ from warp._src.context import clone as clone
 from warp._src.context import empty as empty
 from warp._src.context import empty_like as empty_like
 from warp._src.context import copy as copy
+from warp._src.function_dispatch import ScopedWarpFunctionDisable as ScopedWarpFunctionDisable
 from warp._src.types import indexedarray as indexedarray
 from warp._src.types import indexedarray1d as indexedarray1d
 from warp._src.types import indexedarray2d as indexedarray2d
