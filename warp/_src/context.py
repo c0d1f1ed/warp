@@ -477,12 +477,14 @@ class Function:
 
             arguments = tuple(bound_args.arguments.values())
             arg_types = []
-            for argument in arguments:
-                arg_type = warp._src.codegen.get_arg_type(argument)
-                if type(arg_type) in warp._src.types._ARRAY_ANNOTATION_MAP:
-                    # Runtime arrays own or reference backing allocations, so cache only lightweight annotations.
-                    arg_type = type(arg_type)[arg_type.dtype, arg_type.ndim]
-                arg_types.append(arg_type)
+            for arg_name, argument in bound_args.arguments.items():
+                # Runtime arrays own or reference allocations; keep only their native types in overload caches.
+                # Normalize before get_arg_type() can interpret an array mixin as a Python sequence.
+                try:
+                    normalized = warp._src.types._normalize_array_argument_type(argument)
+                except TypeError as error:
+                    raise TypeError(f"Error calling function '{self.key}', argument '{arg_name}': {error}") from error
+                arg_types.append(warp._src.codegen.get_arg_type(normalized))
 
             overload = self.get_overload(tuple(arg_types), {})
             if overload is not None:
@@ -510,11 +512,14 @@ class Function:
                     inference_arg_names.append(arg_name)
 
                 # Attempt to unify ordinary argument types with function template types.
-                warp._src.types.infer_argument_types(
-                    inference_arguments,
-                    inference_template_types,
-                    inference_arg_names,
-                )
+                try:
+                    warp._src.types.infer_argument_types(
+                        inference_arguments,
+                        inference_template_types,
+                        inference_arg_names,
+                    )
+                except TypeError as error:
+                    raise TypeError(f"Error calling function '{self.key}': {error}") from error
                 return overload.func(*arguments)
 
             # We got here without ever calling an overload.func
@@ -1383,11 +1388,25 @@ class Kernel:
 
         arg_names = list(self.adj.arg_types.keys())
 
-        return warp._src.types.infer_argument_types(args, template_types, arg_names)
+        try:
+            return warp._src.types.infer_argument_types(args, template_types, arg_names)
+        except TypeError as error:
+            raise TypeError(f"Error launching kernel '{self.key}': {error}") from error
 
     def add_overload(self, arg_types):
         if len(arg_types) != len(self.adj.arg_types):
             raise RuntimeError(f"Invalid number of arguments for kernel {self.key}")
+
+        # Callers such as optimizers pass live arrays as descriptors. Never retain those allocations
+        # or application subclass identities in the compiler's specialization types.
+        arg_names = list(self.adj.arg_types.keys())
+        normalized_types = []
+        for arg_name, arg_type in zip(arg_names, arg_types, strict=True):
+            try:
+                normalized_types.append(warp._src.types._normalize_array_argument_type(arg_type))
+            except TypeError as error:
+                raise TypeError(f"Kernel '{self.key}', argument '{arg_name}': {error}") from error
+        arg_types = normalized_types
 
         # get a type signature from the given argument types
         sig = warp._src.types.get_signature(arg_types, func_name=self.key)
@@ -1399,7 +1418,6 @@ class Kernel:
         # Log that we're creating a new overload (will trigger module hash change and recompilation)
         log_debug(f"[Kernel.add_overload] Creating new overload for {self.key}: {sig}")
 
-        arg_names = list(self.adj.arg_types.keys())
         template_types = list(self.adj.arg_types.values())
 
         # make sure all argument types are concrete and match the kernel parameters

@@ -2793,7 +2793,8 @@ def type_repr(t) -> str:
     if t is Any:
         return "Any"
     if is_array(t):
-        cls_name = concrete_array_type(t).__name__
+        # Diagnostics describe the Python object, while compiler types use its native family.
+        cls_name = t._concrete_cls.__name__ if isinstance(t, _ArrayAnnotationBase) else type(t).__name__
         if isinstance(t, _ArrayAnnotationBase) or (hasattr(t, "device") and t.device is None):
             # array is used as a type annotation - display ndim instead of shape
             ndim_repr = "Any" if t.ndim is Any else t.ndim
@@ -2989,10 +2990,13 @@ def matches_array_class(t, cls) -> builtins.bool:
 
 
 def concrete_array_type(t) -> type:
-    """Return the concrete array class for an annotation or instance."""
-    if isinstance(t, _ArrayAnnotationBase):
+    """Return an array's native family, preserving ``type(t)`` for non-arrays."""
+    cls = type(t)
+    if id(cls) in _ARRAY_FAMILY_IDS:
+        return cls
+    if issubclass(cls, _ArrayAnnotationBase):
         return t._concrete_cls
-    return type(t)
+    return _resolve_array_family(t) or type(t)
 
 
 def is_tuple(x) -> builtins.bool:
@@ -5691,6 +5695,61 @@ _ARRAY_ANNOTATION_MAP = {
     indexedfabricarray: _IndexedFabricArrayAnnotation,
 }
 
+# Registered classes are retained by array_types. Compare identities without invoking
+# application metaclass hashing or equality; this is not a cache of user classes.
+_ARRAY_FAMILY_IDS = frozenset(id(cls) for cls in array_types)
+# Read the actual type slot; a metaclass can override __mro__ attribute lookup,
+# including with a property that type.__getattribute__ would still invoke.
+_TYPE_MRO_DESCRIPTOR = type.__dict__["__mro__"]
+
+
+def _resolve_array_family(value) -> type | None:
+    """Resolve a real array ancestor without consulting a spoofable ``__class__``.
+
+    Unrelated native families cannot share a descriptor layout. Mixins and diamonds
+    within one family are valid; ``fixedarray`` keeps its separate compiler type.
+    """
+    cls = type(value)
+    if id(cls) in _ARRAY_FAMILY_IDS:
+        return cls
+
+    # Built-in bases make issubclass() consult the real type slots, even when
+    # an application metaclass overrides attribute lookup or equality.
+    if not issubclass(cls, (indexedarray, fabricarray, indexedfabricarray, fixedarray, _ArrayAnnotationBase)):
+        return array if issubclass(cls, array) else None
+
+    if issubclass(cls, _ArrayAnnotationBase):
+        return value._concrete_cls
+
+    mro = _TYPE_MRO_DESCRIPTOR.__get__(cls)
+    candidates = [ancestor for ancestor in mro if id(ancestor) in _ARRAY_FAMILY_IDS]
+    if len(candidates) > 1:
+        candidates = [
+            candidate
+            for candidate in candidates
+            if not any(
+                candidate is not other and candidate in _TYPE_MRO_DESCRIPTOR.__get__(other) for other in candidates
+            )
+        ]
+        if len(candidates) > 1:
+            names = ", ".join(f"wp.{candidate.__name__}" for candidate in candidates)
+            raise TypeError(
+                f"Array subclass '{cls.__qualname__}' derives from unrelated Warp array families ({names}); "
+                "exactly one native array family is required"
+            )
+    return candidates[0] if candidates else None
+
+
+def _normalize_array_argument_type(value):
+    """Describe host array values with storage-free native annotations."""
+    cls = type(value)
+    if cls is type or cls is int or cls is float or cls is builtins.bool or issubclass(cls, _ArrayAnnotationBase):
+        return value
+    annotation_cls = _ARRAY_ANNOTATION_MAP.get(_resolve_array_family(value))
+    if annotation_cls is None:
+        return value
+    return annotation_cls(value.dtype, value.ndim)
+
 
 def _parse_array_subscript(cls, params):
     """Parse subscript parameters for array-like types.
@@ -8371,13 +8430,22 @@ def infer_argument_types(args: list[Any], template_types, arg_names: list[str] |
         arg = args[i]
         arg_type = type(arg)
         arg_name = arg_names[i] if arg_names else str(i)
-        if arg_type in array_types:
-            arg_types.append(arg_type(dtype=arg.dtype, ndim=arg.ndim))
+        if arg_type is int or arg_type is float or arg_type is builtins.bool:
+            arg_types.append(type_to_warp(arg_type))
+            continue
+        try:
+            family = None if issubclass(arg_type, _ArrayAnnotationBase) else _resolve_array_family(arg)
+        except TypeError as error:
+            raise TypeError(f"Unable to infer the type of argument '{arg_name}': {error}") from error
+        if family is not None:
+            annotation_cls = _ARRAY_ANNOTATION_MAP.get(family)
+            if annotation_cls is not None:
+                arg_types.append(annotation_cls(arg.dtype, arg.ndim))
+            else:
+                # Preserve fixedarray's stack size without calling a user constructor.
+                arg_types.append(family(dtype=arg.dtype, shape=arg.shape))
         elif arg_type in scalar_and_bool_types:
             arg_types.append(arg_type)
-        elif arg_type in (int, float, builtins.bool):
-            # canonicalize type
-            arg_types.append(type_to_warp(arg_type))
         elif hasattr(arg_type, "_wp_scalar_type_"):
             # vector/matrix type
             arg_types.append(arg_type)
@@ -8390,7 +8458,12 @@ def infer_argument_types(args: list[Any], template_types, arg_names: list[str] |
             # allow passing None for arrays
             t = template_types[i]
             if is_array(t):
-                arg_types.append(type(t)(dtype=t.dtype, ndim=t.ndim))
+                family = concrete_array_type(t)
+                annotation_cls = _ARRAY_ANNOTATION_MAP.get(family)
+                if annotation_cls is not None:
+                    arg_types.append(annotation_cls(t.dtype, t.ndim))
+                else:
+                    arg_types.append(family(dtype=t.dtype, shape=t.shape))
             else:
                 raise TypeError(f"Unable to infer the type of argument '{arg_name}', got None")
         else:

@@ -31,6 +31,11 @@ import warp.config
 from warp._src.deterministic import DeterministicCodegen, WarpDeterminismError
 from warp._src.logger import log_debug, log_warning
 from warp._src.types import *
+from warp._src.types import (
+    _ARRAY_ANNOTATION_MAP,
+    _ArrayAnnotationBase,
+    _resolve_array_family,
+)
 
 # used as a globally accessible copy
 # of current compile options (block_dim) etc
@@ -490,6 +495,22 @@ def _make_struct_field_constructor(field: str, var_type: type):
         return lambda ctype: var_type()
 
 
+def _validate_array_parameter_annotation(annotation, context):
+    """Keep runtime subclasses out of source-level array annotations."""
+    cls = type(annotation)
+    if issubclass(cls, _ArrayAnnotationBase):
+        return
+    try:
+        family = _resolve_array_family(annotation)
+    except TypeError as error:
+        raise TypeError(f"{context}: {error}") from error
+    if family in _ARRAY_ANNOTATION_MAP and cls is not family:
+        raise TypeError(
+            f"{context} uses an array subclass instance as an annotation; "
+            f"use the native parent annotation wp.{family.__name__}[dtype] instead"
+        )
+
+
 def _make_struct_field_setter(cls, field: str, var_type: type):
     def check_array_ndim(value):
         if var_type.ndim is not Any and value.ndim != var_type.ndim:
@@ -691,6 +712,7 @@ class Struct:
 
         annotations = get_annotations(self.cls)
         for label, type_ in annotations.items():
+            _validate_array_parameter_annotation(type_, f"Struct field '{label}'")
             self.vars[label] = Var(label, type_)
 
         fields = []
@@ -2014,6 +2036,8 @@ class Adjoint:
             # skip return hint
             if name == "return":
                 continue
+
+            _validate_array_parameter_annotation(type, f"Argument '{name}' of '{adj.fun_name}'")
 
             # add variable for argument
             arg = Var(name, type, requires_grad=False)
