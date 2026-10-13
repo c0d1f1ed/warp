@@ -5701,6 +5701,12 @@ _ARRAY_FAMILY_IDS = frozenset(id(cls) for cls in array_types)
 # Read the actual type slot; a metaclass can override __mro__ attribute lookup,
 # including with a property that type.__getattribute__ would still invoke.
 _TYPE_MRO_DESCRIPTOR = type.__dict__["__mro__"]
+_ARRAY_CTYPE_MAP = {
+    array: array_t,
+    indexedarray: indexedarray_t,
+    fabricarray: fabricarray_t,
+    indexedfabricarray: indexedfabricarray_t,
+}
 
 
 def _resolve_array_family(value) -> type | None:
@@ -5751,6 +5757,45 @@ def _normalize_array_argument_type(value):
     return annotation_cls(value.dtype, value.ndim)
 
 
+def _validate_array_subclass_descriptor(value, descriptor, expected_family, ndim):
+    """Validate a subclass descriptor's layout before passing it to native code.
+
+    This checks representation, not pointer validity or allocation ownership.
+    Exact built-in arrays retain their existing trusted descriptor path.
+    """
+    if type(value) is expected_family:
+        return descriptor
+    descriptor_cls = _ARRAY_CTYPE_MAP[expected_family]
+    if not issubclass(type(descriptor), descriptor_cls):
+        raise TypeError(
+            f"Array subclass '{type(value).__qualname__}' must return {descriptor_cls.__name__} from __ctype__(), "
+            f"got {type(descriptor).__name__}"
+        )
+    if ctypes.sizeof(descriptor) != ctypes.sizeof(descriptor_cls):
+        raise TypeError(
+            f"Array subclass '{type(value).__qualname__}' returned an incompatible {descriptor_cls.__name__} size"
+        )
+    if type(descriptor) is not descriptor_cls:
+        # Use native fields rather than potentially overridden Python properties,
+        # and keep CPU launch cache keys independent of application descriptor classes.
+        original_descriptor = descriptor
+        descriptor = descriptor_cls.from_buffer_copy(descriptor)
+        descriptor._ref = original_descriptor
+    if expected_family is array:
+        descriptor_ndim = descriptor.ndim
+    elif expected_family is indexedarray:
+        descriptor_ndim = descriptor.data.ndim
+    else:
+        return descriptor
+    expected_ndim = value.ndim if ndim is Any else ndim
+    if descriptor_ndim != expected_ndim:
+        raise ValueError(
+            f"Array subclass '{type(value).__qualname__}' returned a descriptor with {descriptor_ndim} dimension(s), "
+            f"expected {expected_ndim}"
+        )
+    return descriptor
+
+
 def _parse_array_subscript(cls, params):
     """Parse subscript parameters for array-like types.
 
@@ -5778,13 +5823,14 @@ def _parse_array_subscript(cls, params):
 
 
 def array_type_id(a):
-    if matches_array_class(a, array):
+    family = _resolve_array_family(a)
+    if family is array or family is fixedarray:
         return ARRAY_TYPE_REGULAR
-    elif matches_array_class(a, indexedarray):
+    elif family is indexedarray:
         return ARRAY_TYPE_INDEXED
-    elif matches_array_class(a, fabricarray):
+    elif family is fabricarray:
         return ARRAY_TYPE_FABRIC
-    elif matches_array_class(a, indexedfabricarray):
+    elif family is indexedfabricarray:
         return ARRAY_TYPE_FABRIC_INDEXED
     else:
         raise ValueError("Invalid array type")

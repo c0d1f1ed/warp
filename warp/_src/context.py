@@ -10829,14 +10829,21 @@ def pack_arg(kernel, arg_type, arg_name, value, device, adjoint=False):
             # check for array type
             # - in forward passes, array types have to match
             # - in backward passes, indexed array gradients are regular arrays
-            if adjoint:
-                array_matches = isinstance(value, warp.array)
+            expected_family = warp.array if adjoint else warp._src.types.concrete_array_type(arg_type)
+            if type(value) is expected_family:
+                # Keep ordinary built-in arrays on the existing fast path.
+                value_family = expected_family
             else:
-                array_matches = type(value) is warp._src.types.concrete_array_type(arg_type)
+                try:
+                    value_family = warp._src.types._resolve_array_family(value)
+                except TypeError as e:
+                    adj = "adjoint " if adjoint else ""
+                    raise RuntimeError(f"Error launching kernel '{kernel.key}', {adj}argument '{arg_name}': {e}") from e
+            array_matches = value_family is expected_family
 
             if not array_matches:
                 # if a regular Warp array is required, try converting from __cuda_array_interface__ or __array_interface__
-                if warp._src.types.matches_array_class(arg_type, warp.array):
+                if value_family is None and warp._src.types.matches_array_class(arg_type, warp.array):
                     if device.is_cuda:
                         # check for __cuda_array_interface__
                         try:
@@ -10891,7 +10898,15 @@ def pack_arg(kernel, arg_type, arg_name, value, device, adjoint=False):
             if warp.config.launch_array_access_mode != warp.config.LaunchArrayAccessMode.RELAXED:
                 _validate_launch_array_access(kernel, arg_name, value, device)
 
-            return value.__ctype__()
+            if type(value) is expected_family:
+                return value.__ctype__()
+            try:
+                return warp._src.types._validate_array_subclass_descriptor(
+                    value, value.__ctype__(), expected_family, arg_type.ndim
+                )
+            except Exception as e:
+                adj = "adjoint " if adjoint else ""
+                raise RuntimeError(f"Error launching kernel '{kernel.key}', {adj}argument '{arg_name}': {e}") from e
 
     # Handle Texture1D, Texture2D and Texture3D types (when used as type annotations)
     elif arg_type is Texture1D:

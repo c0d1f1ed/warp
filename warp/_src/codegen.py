@@ -35,6 +35,7 @@ from warp._src.types import (
     _ARRAY_ANNOTATION_MAP,
     _ArrayAnnotationBase,
     _resolve_array_family,
+    _validate_array_subclass_descriptor,
 )
 
 # used as a globally accessible copy
@@ -512,6 +513,21 @@ def _validate_array_parameter_annotation(annotation, context):
 
 
 def _make_struct_field_setter(cls, field: str, var_type: type):
+    def check_array_family(value, family, description):
+        try:
+            actual_family = _resolve_array_family(value)
+        except TypeError as error:
+            raise TypeError(f"Struct field '{field}': {error}") from error
+        if actual_family is not family:
+            raise TypeError(f"Struct field '{field}' expects {description}, got {type(value).__name__}")
+
+    def get_array_descriptor(value, family):
+        try:
+            descriptor = value.__ctype__()
+            return _validate_array_subclass_descriptor(value, descriptor, family, var_type.ndim)
+        except Exception as error:
+            raise TypeError(f"Struct field '{field}': {error}") from error
+
     def check_array_ndim(value):
         if var_type.ndim is not Any and value.ndim != var_type.ndim:
             raise TypeError(
@@ -525,14 +541,15 @@ def _make_struct_field_setter(cls, field: str, var_type: type):
             setattr(inst._ctype, field, array_t())
         else:
             # wp.array
-            if not isinstance(value, array):
-                raise TypeError(f"Struct field '{field}' expects a Warp array, got {type(value).__name__}")
+            if type(value) is not array:
+                check_array_family(value, array, "a Warp array")
             if not types_equal(value.dtype, var_type.dtype):
                 raise TypeError(
                     f"Struct field '{field}' expects dtype {type_repr(var_type.dtype)}, got {type_repr(value.dtype)}"
                 )
             check_array_ndim(value)
-            setattr(inst._ctype, field, value.__ctype__())
+            descriptor = value.__ctype__() if type(value) is array else get_array_descriptor(value, array)
+            setattr(inst._ctype, field, descriptor)
 
         # Keep gradient buffers alive while the struct's native array
         # descriptor may reference them. Clear any previous keepalive when
@@ -550,14 +567,15 @@ def _make_struct_field_setter(cls, field: str, var_type: type):
         if value is None:
             setattr(inst._ctype, field, var_type.__ctype__())
         else:
-            if not isinstance(value, indexedarray):
-                raise TypeError(f"Struct field '{field}' expects a Warp indexed array, got {type(value).__name__}")
+            if type(value) is not indexedarray:
+                check_array_family(value, indexedarray, "a Warp indexed array")
             if not types_equal(value.dtype, var_type.dtype):
                 raise TypeError(
                     f"Struct field '{field}' expects dtype {type_repr(var_type.dtype)}, got {type_repr(value.dtype)}"
                 )
             check_array_ndim(value)
-            setattr(inst._ctype, field, value.__ctype__())
+            descriptor = value.__ctype__() if type(value) is indexedarray else get_array_descriptor(value, indexedarray)
+            setattr(inst._ctype, field, descriptor)
 
         # workaround to prevent gradient buffers being garbage collected
         # (indexedarray_t embeds an array_t)
@@ -575,14 +593,15 @@ def _make_struct_field_setter(cls, field: str, var_type: type):
         if value is None:
             setattr(inst._ctype, field, var_type.__ctype__())
         else:
-            if not isinstance(value, fabricarray):
-                raise TypeError(f"Struct field '{field}' expects a Warp Fabric array, got {type(value).__name__}")
+            if type(value) is not fabricarray:
+                check_array_family(value, fabricarray, "a Warp Fabric array")
             if not types_equal(value.dtype, var_type.dtype):
                 raise TypeError(
                     f"Struct field '{field}' expects dtype {type_repr(var_type.dtype)}, got {type_repr(value.dtype)}"
                 )
             check_array_ndim(value)
-            setattr(inst._ctype, field, value.__ctype__())
+            descriptor = value.__ctype__() if type(value) is fabricarray else get_array_descriptor(value, fabricarray)
+            setattr(inst._ctype, field, descriptor)
 
         cls.__setattr__(inst, field, value)
 
@@ -591,16 +610,19 @@ def _make_struct_field_setter(cls, field: str, var_type: type):
         if value is None:
             setattr(inst._ctype, field, var_type.__ctype__())
         else:
-            if not isinstance(value, indexedfabricarray):
-                raise TypeError(
-                    f"Struct field '{field}' expects a Warp indexed Fabric array, got {type(value).__name__}"
-                )
+            if type(value) is not indexedfabricarray:
+                check_array_family(value, indexedfabricarray, "a Warp indexed Fabric array")
             if not types_equal(value.dtype, var_type.dtype):
                 raise TypeError(
                     f"Struct field '{field}' expects dtype {type_repr(var_type.dtype)}, got {type_repr(value.dtype)}"
                 )
             check_array_ndim(value)
-            setattr(inst._ctype, field, value.__ctype__())
+            descriptor = (
+                value.__ctype__()
+                if type(value) is indexedfabricarray
+                else get_array_descriptor(value, indexedfabricarray)
+            )
+            setattr(inst._ctype, field, descriptor)
 
         cls.__setattr__(inst, field, value)
 

@@ -9,7 +9,11 @@ original object is retained at runtime.
 """
 
 import collections
+import ctypes
 import gc
+import json
+import os
+import tempfile
 import unittest
 import weakref
 from collections.abc import Sequence
@@ -20,6 +24,7 @@ import numpy as np
 
 import warp as wp
 import warp._src.codegen as codegen
+import warp._src.context as context
 import warp._src.types as wptypes
 from warp.tests.test_fabricarray import _create_fabric_array_interface
 from warp.tests.unittest_utils import (
@@ -27,6 +32,7 @@ from warp.tests.unittest_utils import (
     assert_np_equal,
     get_selected_cuda_test_devices,
     get_test_devices,
+    run_python_subprocess,
 )
 
 # ---------------------------------------------------------------------------------------------
@@ -458,6 +464,14 @@ class TestArraySubclass(unittest.TestCase):
                     wptypes.concrete_array_type(instance)
                 with self.assertRaisesRegex(TypeError, "native array family"):
                     wptypes.infer_argument_types([instance], [wp.array[Any]])
+                with self.assertRaisesRegex(RuntimeError, "native array family"):
+                    context.pack_arg(read_regular, wp.array[float], "a", instance, self.cpu)
+                with self.assertRaisesRegex(RuntimeError, "native array family"):
+                    context.pack_arg(read_indexed, wp.indexedarray[float], "a", instance, self.cpu, adjoint=True)
+                with self.assertRaisesRegex(TypeError, "native array family"):
+                    wptypes.array_type_id(instance)
+                with self.assertRaisesRegex(TypeError, "native array family"):
+                    ArrayBundle().a = instance
                 # Diagnostic rendering must remain usable even for ambiguous objects.
                 instance.dtype = wp.float32
                 instance.ndim = 1
@@ -640,7 +654,7 @@ class TestArraySubclass(unittest.TestCase):
                     meta(f"Meta{base.__name__}", (base,), {})
                     for base in (TaggedArray, TaggedIndexedArray, TaggedFabricArray, TaggedIndexedFabricArray)
                 )
-                for family, (array, _, _kernel), _field in zip(
+                for family, (array, _, kernel), field in zip(
                     FAMILIES, make_families(self.cpu, classes), ("a", "ia", "fa", "ifa"), strict=True
                 ):
                     with self.subTest(family=family.__name__):
@@ -649,6 +663,13 @@ class TestArraySubclass(unittest.TestCase):
                         before = constructor_calls.copy()
                         self.assertEqual(wptypes.infer_argument_types([array], [Any]), [family[wp.float32]])
                         self.assertEqual(constructor_calls, before)
+                        self.assertEqual(
+                            bytes(context.pack_arg(kernel, family[float], "a", array, self.cpu)),
+                            bytes(array.__ctype__()),
+                        )
+                        bundle = ArrayBundle()
+                        setattr(bundle, field, array)
+                        self.assertIs(getattr(bundle, field), array)
 
                 unrelated_cls = meta("Unrelated", (), {})
                 unrelated = unrelated_cls()
@@ -656,6 +677,34 @@ class TestArraySubclass(unittest.TestCase):
                 self.assertFalse(wptypes.is_array(unrelated))
                 with self.assertRaises(TypeError):
                     wptypes.infer_argument_types([unrelated], [Any])
+                with self.assertRaisesRegex(RuntimeError, "expects an array of type"):
+                    context.pack_arg(read_regular, wp.array[float], "a", unrelated, self.cpu)
+
+    def test_exact_launch_packing_keeps_fast_path(self):
+        array = wp.ones(2, dtype=float, device=self.cpu)
+        # Count calls instead of making a timing assertion on a CI worker.
+        with mock.patch.object(wptypes, "_resolve_array_family", wraps=wptypes._resolve_array_family) as resolve:
+            self.assertIs(context.pack_arg(read_regular, wp.array[float], "a", array, self.cpu), array.__ctype__())
+            resolve.assert_not_called()
+
+    def test_exact_struct_fields_keep_fast_path(self):
+        regular = wp.array([1.0, 2.0], dtype=float, device=self.cpu)
+        indices = wp.array([1, 0], dtype=int, device=self.cpu)
+        indexed = wp.indexedarray(regular, indices)
+        fabric = wp.fabricarray(_create_fabric_array_interface(regular, "a", [2]), "a")
+        indexed_fabric = wp.indexedfabricarray(fabric, indices)
+        bundle = ArrayBundle()
+        with (
+            mock.patch.object(codegen, "_resolve_array_family", wraps=wptypes._resolve_array_family) as resolve,
+            mock.patch.object(
+                codegen, "_validate_array_subclass_descriptor", wraps=wptypes._validate_array_subclass_descriptor
+            ) as validate,
+        ):
+            for field, array in zip(("a", "ia", "fa", "ifa"), (regular, indexed, fabric, indexed_fabric), strict=True):
+                setattr(bundle, field, array)
+                self.assertIs(getattr(bundle, field), array)
+            resolve.assert_not_called()
+            validate.assert_not_called()
 
     def test_scalar_function_calls_keep_fast_path(self):
         with mock.patch.object(wptypes, "_resolve_array_family", wraps=wptypes._resolve_array_family) as resolve:
@@ -689,10 +738,163 @@ class TestArraySubclass(unittest.TestCase):
             self.assertIsNone(wptypes._resolve_array_family(object()))
         self.assertEqual(counted_mro.reads, 0)
 
+    def test_hidden_mro_keeps_native_array_semantics(self):
+        bases = (TaggedArray, TaggedIndexedArray, TaggedFabricArray, TaggedIndexedFabricArray)
+        fields = ("a", "ia", "fa", "ifa")
+        for meta in (HiddenMroMeta, PropertyMroMeta):
+            classes = tuple(meta(f"Hidden{base.__name__}", (base,), {}) for base in bases)
+            families = make_families(self.cpu, classes)
+            storage = families[0][0]
+            storage.requires_grad = True
+            storage.retain_grad = True
+            for family, (array, _, kernel), field in zip(FAMILIES, families, fields, strict=True):
+                with self.subTest(metaclass=meta.__name__, family=family.__name__):
+                    self.assertNotIn(family, type(array).__mro__)
+                    self.assertIs(wptypes.concrete_array_type(array), family)
+                    before = constructor_calls.copy()
+                    self.assertEqual(wptypes.infer_argument_types([array], [Any]), [family[wp.float32]])
+                    self.assertEqual(constructor_calls, before)
+                    packed = context.pack_arg(kernel, family[float], "a", array, self.cpu)
+                    self.assertEqual(bytes(packed), bytes(array.__ctype__()))
+                    if family is wp.array:
+                        self.assertEqual(packed.grad, storage.grad.ptr)
+                        self.assertNotEqual(packed.flags, 0)
+                    elif family is wp.indexedarray:
+                        self.assertEqual(packed.data.grad, storage.grad.ptr)
+                        self.assertNotEqual(packed.data.flags, 0)
+                    bundle = ArrayBundle()
+                    setattr(bundle, field, array)
+                    self.assertIs(getattr(bundle, field), array)
+
+                    with self.assertRaisesRegex(RuntimeError, "dtype"):
+                        context.pack_arg(kernel, family[wp.int32], "a", array, self.cpu)
+                    with self.assertRaisesRegex(RuntimeError, "dimension"):
+                        context.pack_arg(kernel, family[float, Literal[2]], "a", array, self.cpu)
+                    other = wp.indexedarray if family is wp.array else wp.array
+                    with self.assertRaisesRegex(RuntimeError, "expects an array of type"):
+                        context.pack_arg(kernel, other[float], "a", array, self.cpu)
+
+            # Hiding the MRO must not turn ambiguous native storage into a proxy.
+            ambiguous_cls = meta("HiddenCrossFamily", (wp.array, wp.indexedarray), {})
+            ambiguous = ambiguous_cls.__new__(ambiguous_cls)
+            with self.subTest(metaclass=meta.__name__, family="ambiguous"):
+                with self.assertRaisesRegex(TypeError, "native array family"):
+                    wptypes.concrete_array_type(ambiguous)
+                with self.assertRaisesRegex(RuntimeError, "native array family"):
+                    context.pack_arg(read_regular, wp.array[float], "a", ambiguous, self.cpu)
+                with self.assertRaisesRegex(TypeError, "native array family"):
+                    ArrayBundle().a = ambiguous
+
+    def test_forged_mro_keeps_external_interface_semantics(self):
+        class ForgedMroLookupMeta(type):
+            def __getattribute__(cls, name):
+                if name == "__mro__":
+                    return (cls, wp.array, object)
+                return super().__getattribute__(name)
+
+        class ForgedMroMeta(type):
+            @property
+            def __mro__(cls):
+                return (cls, wp.array, object)
+
+        class ProviderBase:
+            def __init__(self, owner):
+                self.owner = owner
+
+            @property
+            def __array_interface__(self):
+                return self.owner.__array_interface__
+
+            def __ctype__(self):
+                raise AssertionError("An external interface provider was treated as a Warp array")
+
+        owner = wp.ones(2, device=self.cpu, requires_grad=True)
+        owner.retain_grad = True
+        for meta in (ForgedMroLookupMeta, ForgedMroMeta):
+            with self.subTest(metaclass=meta.__name__):
+                cls = meta("ExternalProvider", (ProviderBase,), {})
+                provider = cls(owner)
+                self.assertIn(wp.array, type(provider).__mro__)
+                self.assertFalse(isinstance(provider, wp.array))
+                self.assertIs(wptypes.concrete_array_type(provider), cls)
+                with self.assertRaisesRegex(TypeError, "Unable to infer"):
+                    wptypes.infer_argument_types([provider], [Any])
+                packed = context.pack_arg(read_regular, wp.array[float], "a", provider, self.cpu)
+                self.assertEqual(packed.data, owner.ptr)
+                self.assertEqual(packed.grad, 0)
+                self.assertEqual(packed.flags, 0)
+                with self.assertRaises(TypeError):
+                    ArrayBundle().a = provider
+
+    def test_cpu_apic_retains_subclass_storage(self):
+        def record():
+            data = TaggedArray([1.0, 2.0, 3.0, 4.0], tag="storage", dtype=float, device=self.cpu)
+            indices = TaggedArray([3, 1, 0, 2], tag="indices", dtype=wp.int32, device=self.cpu)
+            indexed = TaggedIndexedArray(tag="view", data=data, indices=indices)
+            out = TaggedArray(tag="out", shape=4, dtype=float, device=self.cpu)
+            refs = tuple(weakref.ref(array) for array in (data, indices, out))
+            wp.launch(read_indexed, 4, inputs=[indexed], outputs=[out], device=self.cpu)
+            with wp.ScopedCapture(device=self.cpu, apic=True, force_module_load=False) as capture:
+                wp.launch(read_indexed, 4, inputs=[indexed], outputs=[out], device=self.cpu)
+            return capture.graph, refs
+
+        graph, refs = record()
+        gc.collect()
+        for ref in refs:
+            self.assertIsNotNone(ref())
+        refs[2]().zero_()
+        wp.capture_launch(graph)
+        np.testing.assert_allclose(refs[2]().numpy(), [8.0, 4.0, 2.0, 6.0])
+
 
 # ---------------------------------------------------------------------------------------------
 # Tests running on every test device
 # ---------------------------------------------------------------------------------------------
+
+
+def test_launch_concrete_and_generic_kernels(test, device):
+    for array, expected, typed_kernel in make_deep_families(device):
+        family = wptypes.concrete_array_type(array)
+        for kernel in (typed_kernel, read_any, GENERIC_KERNEL_BY_FAMILY[family]):
+            with test.subTest(cls=type(array).__name__, kernel=kernel.key):
+                out = wp.empty(4, dtype=float, device=device)
+                before = constructor_calls.copy()
+                wp.launch(kernel, 4, inputs=[array], outputs=[out], device=device)
+                assert_np_equal(out.numpy(), expected * 2.0)
+                test.assertEqual(constructor_calls, before)
+
+
+def test_launch_with_subclass_outputs(test, device):
+    values = TaggedArray([2.0, 3.0], tag="sensor", dtype=wp.float32, device=device)
+    result = TaggedArray(tag="result", shape=2, dtype=wp.float32, device=device)
+    before = constructor_calls.copy()
+    wp.launch(square, dim=values.size, inputs=[values], outputs=[result], device=device)
+    test.assertEqual(constructor_calls, before)
+    assert_np_equal(result.numpy(), np.array([4.0, 9.0]))
+    test.assertEqual(result.tag, "result")
+
+    # Allocation helpers accept subclass instances without invoking their constructors.
+    fresh = wp.empty_like(values)
+    test.assertIsInstance(fresh, wp.array)
+    wp.launch(square, dim=values.size, inputs=[values], outputs=[fresh], device=device)
+    assert_np_equal(fresh.numpy(), np.array([4.0, 9.0]))
+
+
+def test_specialization_is_shared_with_parent(test, device):
+    parent = wp.array([1.0, 2.0], dtype=float, device=device)
+    child = TaggedArray([1.0, 2.0], tag="child", dtype=float, device=device)
+    sibling = SecondTaggedArray([1.0, 2.0], tag="sibling", dtype=float, device=device)
+    out = wp.empty(2, dtype=float, device=device)
+
+    wp.launch(square, 2, inputs=[parent], outputs=[out], device=device)
+    overload_count = len(square.overloads)
+    wp.launch(square, 2, inputs=[child], outputs=[out], device=device)
+    wp.launch(square, 2, inputs=[sibling], outputs=[out], device=device)
+    test.assertEqual(len(square.overloads), overload_count)
+
+    sig_parent = wptypes.get_signature(square.infer_argument_types([parent, out]))
+    sig_child = wptypes.get_signature(square.infer_argument_types([child, out]))
+    test.assertEqual(sig_parent, sig_child)
 
 
 def test_explicit_overload_is_shared(test, device):
@@ -702,6 +904,177 @@ def test_explicit_overload_is_shared(test, device):
     test.assertIs(copy_generic.add_overload(copy_generic.infer_argument_types([src, dst])), overload)
     wp.launch(copy_generic, 2, inputs=[src], outputs=[dst], device=device)
     assert_np_equal(dst.numpy(), np.array([1.0, 2.0]))
+
+
+def test_validation_errors(test, device):
+    ints = TaggedArray([1, 2], tag="int", dtype=wp.int32, device=device)
+    twod = TaggedArray(np.ones((2, 2), np.float32), tag="2d", dtype=float, device=device)
+    out = wp.zeros(2, dtype=float, device=device)
+
+    with test.assertRaisesRegex(RuntimeError, "dtype"):
+        wp.launch(read_regular, 2, inputs=[ints], outputs=[out], device=device)
+    with test.assertRaisesRegex(RuntimeError, "dimension"):
+        wp.launch(read_regular, 2, inputs=[twod], outputs=[out], device=device)
+    with test.assertRaisesRegex(RuntimeError, "dimension"):
+        context.pack_arg(read_regular, wp.array[float], "a", wp.clone(twod), device)
+
+    families = make_families(device)
+    for array, _, _ in families[1:]:
+        with test.subTest(cls=type(array).__name__):
+            with test.assertRaisesRegex(RuntimeError, "expects an array of type"):
+                context.pack_arg(read_regular, wp.array[float], "a", array, device)
+    with test.assertRaisesRegex(RuntimeError, "expects an array of type"):
+        context.pack_arg(read_indexed, wp.indexedarray[float], "a", families[0][0], device)
+    with test.assertRaisesRegex(RuntimeError, "expects an array of type"):
+        context.pack_arg(read_indexed_fabric, wp.indexedfabricarray[float], "a", families[2][0], device)
+
+    # a generic launch rejects a mismatching dimensionality at specialization time
+    with test.assertRaisesRegex(TypeError, "type mismatch"):
+        wp.launch(read_generic_regular, 2, inputs=[twod], outputs=[out], device=device)
+
+
+def test_external_array_interface_objects(test, device):
+    class NumPyLike:
+        def __init__(self, array):
+            self._array = array
+
+        @property
+        def __array_interface__(self):
+            return self._array.__array_interface__
+
+    values = np.arange(1, 5, dtype=np.float32)
+    out = wp.empty(4, dtype=float, device=device)
+
+    if device.is_cpu:
+        wp.launch(read_regular, 4, inputs=[NumPyLike(values)], outputs=[out], device=device)
+        assert_np_equal(out.numpy(), values * 2.0)
+        wp.launch(read_regular, 4, inputs=[values], outputs=[out], device=device)
+        assert_np_equal(out.numpy(), values * 2.0)
+    else:
+        source = wp.array(values, dtype=float, device=device)
+
+        class CudaLike:
+            @property
+            def __cuda_array_interface__(self):
+                return source.__cuda_array_interface__
+
+        wp.launch(read_regular, 4, inputs=[CudaLike()], outputs=[out], device=device)
+        assert_np_equal(out.numpy(), values * 2.0)
+
+    class ClassSpoof:
+        @property
+        def __class__(self):
+            return wp.array
+
+        @property
+        def __array_interface__(self):
+            return values.__array_interface__
+
+        @property
+        def __cuda_array_interface__(self):
+            return source.__cuda_array_interface__
+
+        def __ctype__(self):
+            raise AssertionError("An external interface provider was treated as a Warp array")
+
+    spoof = ClassSpoof()
+    test.assertIsInstance(spoof, wp.array)
+    wp.launch(read_regular, 4, inputs=[spoof], outputs=[out], device=device)
+    assert_np_equal(out.numpy(), values * 2.0)
+
+
+def test_null_arrays_and_descriptors(test, device):
+    out = wp.zeros(2, dtype=float, device=device)
+    wp.launch(read_or_default, 2, inputs=[None], outputs=[out], device=device)
+    assert_np_equal(out.numpy(), np.array([-1.0, -1.0]))
+
+    source = TaggedArray([5.0, 6.0], tag="descriptor", dtype=float, device=device)
+    descriptor = source.__ctype__()
+    wp.launch(read_or_default, 2, inputs=[descriptor], outputs=[out], device=device)
+    assert_np_equal(out.numpy(), np.array([5.0, 6.0]))
+
+
+def test_gradients_and_tape(test, device):
+    a = TaggedArray([1.0, 2.0, 3.0], tag="in", dtype=float, device=device, requires_grad=True)
+    b = TaggedArray(tag="out", shape=3, dtype=float, device=device, requires_grad=True)
+
+    # the native descriptor keeps the gradient pointer of the original array
+    packed = context.pack_arg(square_float, wp.array[float], "a", a, device)
+    test.assertEqual(packed.grad, a.grad.ptr)
+    test.assertEqual(packed.ndim, 1)
+
+    with wp.Tape() as tape:
+        wp.launch(square_float, 3, inputs=[a], outputs=[b], device=device)
+    test.assertIs(tape.launches[0][3][0], a)
+    tape.backward(grads={b: wp.ones_like(b)})
+    assert_np_equal(a.grad.numpy(), np.array([2.0, 4.0, 6.0]))
+    test.assertIs(tape.gradients[a], a.grad)
+    tape.zero()
+    assert_np_equal(a.grad.numpy(), np.zeros(3))
+
+    # Generic kernels are differentiable as well.
+    a.grad.zero_()
+    b.grad.zero_()
+    with wp.Tape() as tape:
+        wp.launch(square, 3, inputs=[a], outputs=[b], device=device)
+    tape.backward(grads={b: wp.ones_like(b)})
+    assert_np_equal(a.grad.numpy(), np.array([2.0, 4.0, 6.0]))
+
+
+def test_overwrite_gradient_parity(test, device):
+    def make_array(cls, **kwargs):
+        if cls is wp.array:
+            return cls(dtype=float, device=device, requires_grad=True, **kwargs)
+        return cls(tag="gradient", dtype=float, device=device, requires_grad=True, **kwargs)
+
+    def chain(cls, retain_grad):
+        a = make_array(cls, data=[1.0, 1.0], retain_grad=retain_grad)
+        loss = wp.zeros(1, dtype=float, device=device, requires_grad=True)
+        packed = context.pack_arg(double_in_place, wp.array[float], "a", a, device)
+        test.assertEqual(packed.grad, a.grad.ptr)
+        test.assertEqual(packed.flags, a.__ctype__().flags)
+        with wp.Tape() as tape:
+            wp.launch(double_in_place, 2, inputs=[a], device=device)
+            wp.launch(double_in_place, 2, inputs=[a], device=device)
+            wp.launch(sum_values, 2, inputs=[a, loss], device=device)
+        tape.backward(loss=loss)
+        return a.grad.numpy()
+
+    for retain_grad, expected in ((False, 4.0), (True, 9.0)):
+        with test.subTest(retain_grad=retain_grad):
+            parent = chain(wp.array, retain_grad)
+            np.testing.assert_allclose(parent, expected)
+            np.testing.assert_allclose(chain(TaggedArray, retain_grad), parent)
+
+    for cls in (wp.array, TaggedArray):
+        with test.subTest(cls=cls.__name__):
+            first = make_array(cls, data=[1.0, 1.0])
+            second = make_array(cls, data=[1.0, 1.0])
+            result = make_array(cls, shape=2)
+            with wp.Tape() as tape:
+                wp.launch(multiply_two, 2, inputs=[first], outputs=[result], device=device)
+                wp.launch(multiply_three, 2, inputs=[second], outputs=[result], device=device)
+            tape.backward(grads={result: wp.ones_like(result)})
+            for array, expected in ((first, 0.0), (second, 3.0), (result, 0.0)):
+                np.testing.assert_allclose(array.grad.numpy(), expected)
+
+
+def test_gradient_arrays_may_be_subclasses(test, device):
+    a = TaggedArray([1.0, 2.0, 3.0], tag="in", dtype=float, device=device, requires_grad=True)
+    b = TaggedArray(tag="out", shape=3, dtype=float, device=device, requires_grad=True)
+    a.grad = TaggedArray([0.0, 0.0, 0.0], tag="in grad", dtype=float, device=device)
+    b.grad = TaggedArray([1.0, 1.0, 1.0], tag="out grad", dtype=float, device=device)
+    wp.launch(square_float, 3, inputs=[a], outputs=[b], device=device)
+    wp.launch(
+        square_float, 3, inputs=[a], outputs=[b], adj_inputs=[a.grad], adj_outputs=[b.grad], adjoint=True, device=device
+    )
+    assert_np_equal(a.grad.numpy(), np.array([2.0, 4.0, 6.0]))
+
+    # an indexed array's adjoint is a regular array, whatever the family of the forward argument
+    adjoint = TaggedArray([0.0] * 4, tag="adjoint", dtype=float, device=device)
+    packed = context.pack_arg(read_indexed, wp.indexedarray[float], "a", adjoint, device, adjoint=True)
+    test.assertEqual(packed.data, adjoint.ptr)
+    test.assertEqual(tuple(packed.shape)[: packed.ndim], adjoint.shape)
 
 
 def test_python_function_overloads(test, device):
@@ -744,6 +1117,207 @@ def test_sequence_array_overloads(test, device):
     test.assertIs(identify_generic_array(array), array)
 
 
+def test_struct_fields(test, device):
+    families = make_families(device)
+    bundle = ArrayBundle()
+    for name, (array, _, _) in zip(("a", "ia", "fa", "ifa"), families, strict=True):
+        setattr(bundle, name, array)
+        test.assertIs(getattr(bundle, name), array)
+    out = wp.empty(4, dtype=float, device=device)
+    wp.launch(read_bundle, 4, inputs=[bundle], outputs=[out], device=device)
+    assert_np_equal(out.numpy(), sum(expected for _, expected, _ in families))
+
+    arr = TaggedArray([1.0, 2.0], tag="nested", dtype=float, device=device)
+    inner = InnerStruct()
+    inner.arr = arr
+    outer = OuterStruct()
+    outer.inner = inner
+    outer.scale = 3.0
+    test.assertIs(outer.inner.arr, arr)
+    out = wp.empty(2, dtype=float, device=device)
+    wp.launch(read_nested, 2, inputs=[outer], outputs=[out], device=device)
+    assert_np_equal(out.numpy(), np.array([3.0, 6.0]))
+
+    with test.assertRaises(TypeError):
+        bundle.a = families[1][0]
+
+
+def test_struct_descriptor_errors_preserve_field(test, device):
+    class BrokenDescriptor(TaggedArray):
+        def __ctype__(self):
+            raise KeyError("descriptor failure")
+
+    original = TaggedArray([1.0, 2.0], tag="original", dtype=float, device=device)
+    bad = BrokenDescriptor([3.0, 4.0], tag="bad", dtype=float, device=device)
+    bundle = ArrayBundle()
+    bundle.a = original
+    previous = bytes(bundle.__ctype__())
+    with test.assertRaisesRegex(TypeError, "Struct field 'a'.*descriptor failure"):
+        bundle.a = bad
+    test.assertIs(bundle.a, original)
+    test.assertEqual(bytes(bundle.__ctype__()), previous)
+    owner = weakref.ref(original)
+    del original
+    gc.collect()
+    test.assertIs(bundle.a, owner())
+
+
+def test_subclass_descriptor_validation(test, device):
+    def descriptor_subclass(family, base, mode):
+        def ctype(self):
+            self.descriptor_calls += 1
+            native = family.__ctype__(self)
+            descriptor_cls = type(native)
+            if mode == "wrong_class":
+                return ctypes.c_uint64(0)
+            if mode in ("wrong_class_equal_size", "spoofed_class_equal_size"):
+                attributes = {"_fields_": [("data", ctypes.c_byte * ctypes.sizeof(native))]}
+                if mode == "spoofed_class_equal_size":
+                    attributes["__class__"] = property(lambda _: descriptor_cls)
+                wrong_class = type(
+                    "UnrelatedDescriptor",
+                    (ctypes.Structure,),
+                    attributes,
+                )
+                return wrong_class.from_buffer_copy(native)
+            if mode == "wrong_size":
+                extra = type("ExtendedDescriptor", (descriptor_cls,), {"_fields_": [("extra", ctypes.c_uint64)]})
+                return extra.__new__(extra)
+            if mode == "wrong_ndim":
+                descriptor = descriptor_cls.from_buffer_copy(native)
+                if family is wp.indexedarray:
+                    descriptor.data.ndim = 2
+                else:
+                    descriptor.ndim = 2
+                return descriptor
+            if mode == "hidden_wrong_ndim":
+                if family is wp.array:
+                    native.ndim = 2
+                    hidden = type("HiddenRankDescriptor", (descriptor_cls,), {"ndim": property(lambda _: self.ndim)})
+                else:
+                    native.data.ndim = 2
+                    data_cls = type(native.data)
+                    hidden_data = type("HiddenRankData", (data_cls,), {"ndim": property(lambda _: self.ndim)})
+                    hidden = type(
+                        "HiddenRankDescriptor",
+                        (descriptor_cls,),
+                        {"data": property(hidden_data.from_buffer)},
+                    )
+                return hidden.from_buffer_copy(native)
+            compatible = type("CompatibleDescriptor", (descriptor_cls,), {})
+            return compatible.from_buffer_copy(native)
+
+        return type("DescriptorArray", (base,), {"__ctype__": ctype, "descriptor_calls": 0})
+
+    bases = (TaggedArray, TaggedIndexedArray, TaggedFabricArray, TaggedIndexedFabricArray)
+    expected = np.arange(1, 5, dtype=np.float32)
+    storage = wp.array(expected, dtype=float, device=device)
+    indices = wp.array([3, 1, 0, 2], dtype=wp.int32, device=device)
+    interface = _create_fabric_array_interface(storage, "a", [2, 2])
+    fabric_storage = wp.fabricarray(interface, "a")
+    for mode in ("wrong_class", "wrong_class_equal_size", "spoofed_class_equal_size", "wrong_size", "compatible"):
+        classes = tuple(descriptor_subclass(family, base, mode) for family, base in zip(FAMILIES, bases, strict=True))
+        # Each invalid descriptor has valid backing storage. In particular an
+        # invalid Fabric descriptor must not be embedded during construction of
+        # the separate indexed Fabric case.
+        values = (
+            (classes[0](tag="descriptor", data=expected, dtype=float, device=device), expected, read_regular),
+            (classes[1](tag="descriptor", data=storage, indices=indices), expected[[3, 1, 0, 2]], read_indexed),
+            (classes[2](tag="descriptor", data=interface, attrib="a"), expected, read_fabric),
+            (
+                classes[3](tag="descriptor", fa=fabric_storage, indices=indices),
+                expected[[3, 1, 0, 2]],
+                read_indexed_fabric,
+            ),
+        )
+        for family, (array, expected_values, kernel), field in zip(
+            FAMILIES, values, ("a", "ia", "fa", "ifa"), strict=True
+        ):
+            with test.subTest(family=family.__name__, descriptor=mode):
+                if mode == "compatible":
+                    descriptor = context.pack_arg(kernel, family[float], "a", array, device)
+                    test.assertEqual(array.descriptor_calls, 1)
+                    test.assertIs(type(descriptor), type(family.__ctype__(array)))
+                    test.assertEqual(ctypes.sizeof(descriptor), ctypes.sizeof(family.__ctype__(array)))
+                    bundle = ArrayBundle()
+                    setattr(bundle, field, array)
+                    test.assertEqual(array.descriptor_calls, 2)
+                    test.assertIs(getattr(bundle, field), array)
+                    out = wp.empty(4, dtype=float, device=device)
+                    wp.launch(kernel, 4, inputs=[array], outputs=[out], device=device)
+                    np.testing.assert_allclose(out.numpy(), expected_values * 2.0)
+                    cache_size = len(kernel._invoke_cache)
+                    for _ in range(3):
+                        wp.launch(kernel, 4, inputs=[array], outputs=[out], device=device)
+                    np.testing.assert_allclose(out.numpy(), expected_values * 2.0)
+                    test.assertEqual(len(kernel._invoke_cache), cache_size)
+                else:
+                    with test.assertRaisesRegex(RuntimeError, "__ctype__|incompatible"):
+                        context.pack_arg(kernel, family[float], "a", array, device)
+                    test.assertEqual(array.descriptor_calls, 1)
+                    with test.assertRaisesRegex(TypeError, f"Struct field '{field}'"):
+                        setattr(ArrayBundle(), field, array)
+
+    wrong_ndim_cls = descriptor_subclass(wp.array, TaggedArray, "wrong_ndim")
+    wrong_ndim = wrong_ndim_cls(tag="invalid ndim", shape=4, dtype=float, device=device)
+    for annotation, adjoint in ((wp.array[float], False), (wp.indexedarray[float], True)):
+        with test.subTest(adjoint=adjoint):
+            with test.assertRaisesRegex(RuntimeError, "descriptor.*dimension"):
+                context.pack_arg(read_regular, annotation, "a", wrong_ndim, device, adjoint=adjoint)
+    with test.assertRaisesRegex(TypeError, "Struct field 'a'"):
+        ArrayBundle().a = wrong_ndim
+
+    wrong_indexed_cls = descriptor_subclass(wp.indexedarray, TaggedIndexedArray, "wrong_ndim")
+    wrong_indexed = wrong_indexed_cls(tag="invalid embedded ndim", data=storage, indices=indices)
+    malformed_backing = TaggedIndexedArray(tag="invalid backing ndim", data=wrong_ndim, indices=indices)
+    valid_indexed = TaggedIndexedArray(tag="valid", data=storage, indices=indices)
+    out = wp.empty(4, dtype=float, device=device)
+    for array, family, field, kernel, valid in (
+        (wrong_ndim, wp.array, "a", read_regular, storage),
+        (wrong_indexed, wp.indexedarray, "ia", read_indexed, valid_indexed),
+        (malformed_backing, wp.indexedarray, "ia", read_indexed, valid_indexed),
+    ):
+        with test.subTest(family=family.__name__, malformed_backing=array is malformed_backing):
+            with test.assertRaisesRegex(RuntimeError, "argument 'a'.*descriptor.*dimension"):
+                context.pack_arg(kernel, family[float], "a", array, device)
+            with test.assertRaisesRegex(TypeError, f"Struct field '{field}'.*descriptor.*dimension"):
+                setattr(ArrayBundle(), field, array)
+            command = wp.launch(kernel, 4, inputs=[valid], outputs=[out], device=device, record_cmd=True)
+            with test.assertRaisesRegex(RuntimeError, "argument 'a'.*descriptor.*dimension"):
+                command.set_param_by_name("a", array)
+
+    for family, base, kernel in (
+        (wp.array, TaggedArray, read_regular),
+        (wp.indexedarray, TaggedIndexedArray, read_indexed),
+    ):
+        hidden_cls = descriptor_subclass(family, base, "hidden_wrong_ndim")
+        kwargs = (
+            {"data": storage, "indices": indices}
+            if family is wp.indexedarray
+            else {"shape": 4, "dtype": float, "device": device}
+        )
+        hidden_rank = hidden_cls(tag="hidden native rank", **kwargs)
+        with test.subTest(family=family.__name__, descriptor="hidden_wrong_ndim"):
+            with test.assertRaisesRegex(RuntimeError, "descriptor.*dimension"):
+                context.pack_arg(kernel, family[float], "a", hidden_rank, device)
+
+
+def test_wrong_family_does_not_use_external_interface(test, device):
+    class IndexedWithInterface(TaggedIndexedArray):
+        @property
+        def __array_interface__(self):
+            return self.data.__array_interface__
+
+        @property
+        def __cuda_array_interface__(self):
+            return self.data.__cuda_array_interface__
+
+    values = TaggedArray([1.0, 2.0], tag="backing", dtype=float, device=device)
+    indexed = IndexedWithInterface(tag="indexed", data=values, indices=wp.array([1, 0], dtype=wp.int32, device=device))
+    with test.assertRaisesRegex(RuntimeError, "expects an array of type"):
+        context.pack_arg(read_regular, wp.array[float], "a", indexed, device)
+
+
 def test_function_defaults(test, device):
     a = TaggedArray([1.0, 2.0], tag="defaults", dtype=float, device=device)
     out = wp.empty(2, dtype=float, device=device)
@@ -751,13 +1325,301 @@ def test_function_defaults(test, device):
     assert_np_equal(out.numpy(), np.array([3.0, 6.0]))
 
 
+def test_array_views_in_kernels(test, device):
+    values = TaggedArray(np.arange(6, dtype=np.float32).reshape(3, 2), tag="views", dtype=float, device=device)
+    out = TaggedArray(tag="views out", shape=3, dtype=float, device=device)
+    before = constructor_calls.copy()
+    # Explicit live descriptors must be normalized before view inference too.
+    overload = wp.overload(row_view_kernel, [values, out])
+    test.assertIsInstance(overload.adj.args[0].type, wptypes._ArrayAnnotationBase)
+    wp.launch(row_view_kernel, 3, inputs=[values], outputs=[out], device=device)
+    test.assertEqual(constructor_calls, before)
+    assert_np_equal(out.numpy(), np.array([0.0, 2.0, 4.0]))
+
+
+def test_vector_dtypes_and_dimensions(test, device):
+    vectors = TaggedArray(np.ones((3, 3), np.float32), tag="vec", dtype=wp.vec3, device=device)
+    out = wp.empty(3, dtype=float, device=device)
+    wp.launch(read_vec3, 3, inputs=[vectors], outputs=[out], device=device)
+    assert_np_equal(out.numpy(), np.array([3.0, 3.0, 3.0]))
+
+    matrix = TaggedArray(np.arange(6, dtype=np.float32).reshape(3, 2), tag="2d", dtype=float, device=device)
+    wp.launch(read_2d, 3, inputs=[matrix], outputs=[out], device=device)
+    assert_np_equal(out.numpy(), np.array([0.0, 2.0, 4.0]))
+
+    vector_out = TaggedArray(tag="generic out", shape=3, dtype=wp.vec3, device=device)
+    generic_in = TaggedArray(np.ones((3, 3), np.float32), tag="generic in", dtype=wp.vec3, device=device)
+    wp.launch(copy_generic, 3, inputs=[generic_in], outputs=[vector_out], device=device)
+    assert_np_equal(vector_out.numpy(), np.ones((3, 3)))
+
+    # Inherited interop interfaces can reinterpret these layouts. A recognized
+    # Warp subclass must validate its actual dtype instead of taking that path.
+    scalar_matrix = TaggedArray(np.arange(6, dtype=np.float32).reshape(2, 3), tag="scalar", dtype=float, device=device)
+    vector_array = TaggedArray(np.arange(6, dtype=np.float32).reshape(2, 3), tag="vector", dtype=wp.vec3, device=device)
+    for annotation, array in ((wp.array[wp.vec3], scalar_matrix), (wp.array2d[float], vector_array)):
+        with test.subTest(dtype=array.dtype):
+            with test.assertRaisesRegex(RuntimeError, "dtype"):
+                context.pack_arg(read_regular, annotation, "a", array, device)
+
+
+def test_struct_and_bfloat16_dtypes(test, device):
+    host = np.zeros(2, dtype=Record.numpy_dtype())
+    host["v"] = [[1.0, 2.0, 3.0], [2.0, 3.0, 4.0]]
+    host["w"] = [4.0, 5.0]
+    records = TaggedArray(host, tag="records", dtype=Record, device=device)
+    out = wp.empty(2, dtype=float, device=device)
+    wp.launch(read_record, 2, inputs=[records], outputs=[out], device=device)
+    np.testing.assert_allclose(out.numpy(), [10.0, 14.0])
+
+    values = TaggedArray(tag="bfloat16", shape=2, dtype=wp.bfloat16, device=device)
+    bits = np.array([1.0, 2.0], dtype=np.float32).view(np.uint32)
+    src = wp.array((bits >> 16).astype(np.uint16), dtype=wp.uint16, device=device)
+    wp.copy(values.view(wp.uint16), src)
+    wp.launch(read_bfloat16, 2, inputs=[values], outputs=[out], device=device)
+    np.testing.assert_allclose(out.numpy(), [1.0, 2.0])
+
+
+def test_host_operations_keep_identity(test, device):
+    families = make_families(device)
+    array = families[0][0]
+    for source, expected, _ in families:
+        destination = TaggedArray(tag="copy", shape=4, dtype=float, device=device)
+        wp.copy(destination, source)
+        assert_np_equal(destination.numpy(), expected)
+        for result in (wp.clone(source), wp.empty_like(source), wp.zeros_like(source)):
+            test.assertIsInstance(result, wp.array)
+
+    view_owner = TaggedArray([1.0, 2.0, 3.0, 4.0], tag="view owner", dtype=float, device=device)
+    owner_ref = weakref.ref(view_owner)
+    view = view_owner.reshape((2, 2))
+    strided = view_owner[::2]
+    test.assertIsInstance(view, wp.array)
+    test.assertIsInstance(strided, wp.array)
+    del view_owner
+    gc.collect()
+    test.assertIsNotNone(owner_ref())
+    assert_np_equal(view.numpy(), np.array([[1.0, 2.0], [3.0, 4.0]]))
+    assert_np_equal(strided.numpy(), np.array([1.0, 3.0]))
+    del view, strided
+    gc.collect()
+    test.assertIsNone(owner_ref())
+
+    # existing no-op paths keep returning the original object
+    test.assertIs(array.to(device), array)
+    test.assertIs(array.contiguous(), array)
+
+    array.fill_(7.0)
+    assert_np_equal(array.numpy(), np.full(4, 7.0))
+    array.assign(np.arange(4, dtype=np.float32))
+    test.assertEqual(array.list(), [0.0, 1.0, 2.0, 3.0])
+
+    source = TaggedArray([1.0, 2.0, 3.0], tag="scan", dtype=float, device=device)
+    scanned = TaggedArray(tag="scan out", shape=3, dtype=float, device=device)
+    wp.utils.array_scan(source, scanned)
+    assert_np_equal(scanned.numpy(), np.array([1.0, 3.0, 6.0]))
+    converted = TaggedArray(tag="cast out", shape=3, dtype=wp.int32, device=device)
+    wp.utils.array_cast(source, converted)
+    assert_np_equal(converted.numpy(), np.array([1, 2, 3]))
+
+
+def test_launch_command_parameter_replacement(test, device):
+    a = TaggedArray([1.0, 2.0], tag="a", dtype=float, device=device)
+    b = SecondTaggedArray([10.0, 20.0], tag="b", dtype=float, device=device)
+    out = TaggedArray(tag="out", shape=2, dtype=float, device=device)
+    command = wp.launch(read_regular, 2, inputs=[a], outputs=[out], device=device, record_cmd=True)
+    source_ref = weakref.ref(a)
+    del a
+    gc.collect()
+    test.assertIsNotNone(source_ref())
+    command.launch()
+    assert_np_equal(out.numpy(), np.array([2.0, 4.0]))
+    command.set_param_by_name("a", b)
+    command.launch()
+    assert_np_equal(out.numpy(), np.array([20.0, 40.0]))
+    with test.assertRaisesRegex(RuntimeError, "expects an array of type"):
+        command.set_param_at_index(0, make_families(device)[1][0])
+
+
+def test_sgd_live_overload_descriptors(test, device):
+    from warp.optim import SGD  # noqa: PLC0415
+
+    parameter = TaggedArray([1.0, 2.0], tag="parameter", dtype=float, device=device)
+    gradient = TaggedArray([0.5, 1.0], tag="gradient", dtype=float, device=device)
+    parameter_ref = weakref.ref(parameter)
+    optimizer = SGD([parameter], lr=0.2)
+    test.assertIs(optimizer.params[0], parameter)
+    optimizer.step([gradient])
+    np.testing.assert_allclose(parameter.numpy(), [0.9, 1.8])
+    del parameter, optimizer
+    gc.collect()
+    test.assertIsNone(parameter_ref())
+
+
+def test_subprocess_specialization_cache(test, device):
+    source_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    with tempfile.TemporaryDirectory(prefix="wp_array_subclass_") as cache_dir:
+        records = []
+        for cache_state in ("cold", "warm"):
+            result = run_python_subprocess(
+                "import sys; sys.path.insert(0, sys.argv.pop(1)); "
+                "from warp.tests.aux_array_subclass_cache import main; main(*sys.argv[1:])",
+                source_root,
+                device.alias,
+                cache_state,
+                timeout=180,
+                hide_gpu=device.is_cpu,
+                env_updates={"WARP_CACHE_PATH": cache_dir, "PYTHONFAULTHANDLER": "1"},
+            )
+            test.assertEqual(
+                result.returncode,
+                0,
+                f"{cache_state.capitalize()} cache subprocess failed.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}",
+            )
+            marker = "ARRAY_SUBCLASS_CACHE_RESULT="
+            lines = [line.removeprefix(marker) for line in result.stdout.splitlines() if line.startswith(marker)]
+            test.assertEqual(len(lines), 1, result.stdout)
+            records.append(json.loads(lines[0]))
+
+        test.assertGreater(records[0]["native_builds"], 0)
+        test.assertEqual(records[1]["native_builds"], 0)
+        test.assertEqual(records[0]["signatures"], records[1]["signatures"])
+        test.assertEqual(records[0]["module_hash"], records[1]["module_hash"])
+        test.assertEqual(records[0]["wrong_family_rejections"], 3)
+        test.assertEqual(records[1]["wrong_family_rejections"], 3)
+
+
+def test_cross_device_access_modes(test, device):
+    for source_device, target_device in ((device, wp.get_device("cpu")), (wp.get_device("cpu"), device)):
+        storage = wp.array([1.0, 2.0], dtype=float, device=source_device)
+        tagged = TaggedArray([1.0, 2.0], tag="off-device", dtype=float, device=source_device)
+        indices = wp.array([1, 0], dtype=int, device=source_device)
+        families = (
+            (storage, tagged, wp.array, read_regular),
+            (
+                wp.indexedarray(storage, indices),
+                TaggedIndexedArray(tag="off-device indexed", data=tagged, indices=indices),
+                wp.indexedarray,
+                read_indexed,
+            ),
+        )
+        for mode in (wp.config.LaunchArrayAccessMode.CHECKED, wp.config.LaunchArrayAccessMode.STRICT):
+            for parent, subclass, family, kernel in families:
+                with test.subTest(source=source_device, target=target_device, family=family.__name__, mode=mode):
+                    with mock.patch.object(wp.config, "launch_array_access_mode", mode):
+                        try:
+                            context.pack_arg(kernel, family[float], "a", parent, target_device)
+                        except RuntimeError as error:
+                            with test.assertRaises(RuntimeError) as actual:
+                                context.pack_arg(kernel, family[float], "a", subclass, target_device)
+                            test.assertEqual(str(actual.exception), str(error))
+                            test.assertIn("argument 'a'", str(error))
+                        else:
+                            # Some CUDA platforms can access unpinned host allocations.
+                            context.pack_arg(kernel, family[float], "a", subclass, target_device)
+
+    if device.is_uva:
+        pinned = TaggedArray([1.0, 2.0], tag="pinned host", dtype=float, device="cpu", pinned=True)
+        out = wp.empty(2, dtype=float, device=device)
+        with mock.patch.object(wp.config, "launch_array_access_mode", wp.config.LaunchArrayAccessMode.CHECKED):
+            wp.launch(read_regular, 2, inputs=[pinned], outputs=[out], device=device)
+            np.testing.assert_allclose(out.numpy(), [2.0, 4.0])
+        with mock.patch.object(wp.config, "launch_array_access_mode", wp.config.LaunchArrayAccessMode.STRICT):
+            with test.assertRaisesRegex(RuntimeError, "STRICT.*argument 'a'"):
+                wp.launch(read_regular, 2, inputs=[pinned], outputs=[out], device=device)
+
+
+def test_apic_rejects_redirected_descriptors(test, device):
+    class RedirectedArray(TaggedArray):
+        redirected_field = "data"
+
+        def __ctype__(self):
+            descriptor = super().__ctype__()
+            redirected = type(descriptor).from_buffer_copy(descriptor)
+            setattr(redirected, self.redirected_field, self.redirect.ptr)
+            return redirected
+
+    class RedirectedGradArray(RedirectedArray):
+        redirected_field = "grad"
+
+    out = wp.empty(2, dtype=float, device=device)
+    for cls, expected in ((RedirectedArray, [6.0, 8.0]), (RedirectedGradArray, [2.0, 4.0])):
+        with test.subTest(cls=cls.__name__):
+            source = cls([1.0, 2.0], tag="own storage", dtype=float, device=device, requires_grad=True)
+            source.redirect = wp.array([3.0, 4.0], dtype=float, device=device)
+            wp.launch(read_regular, 2, inputs=[source], outputs=[out], device=device)
+            np.testing.assert_allclose(out.numpy(), expected)
+            with test.assertRaisesRegex(RuntimeError, "APIC capture.*own storage"):
+                with wp.ScopedCapture(device=device, apic=True, force_module_load=False):
+                    wp.launch(read_regular, 2, inputs=[source], outputs=[out], device=device)
+
+
+def test_graph_capture_replay(test, device):
+    families = make_families(device)
+    storage = families[0][0]
+    out = TaggedArray(tag="captured out", shape=4, dtype=float, device=device)
+    for family, (source, expected, typed) in zip(FAMILIES, families, strict=True):
+        for reader in (typed, GENERIC_KERNEL_BY_FAMILY[family]):
+            with test.subTest(family=family.__name__, kernel=reader.key):
+                storage.assign(np.arange(1, 5, dtype=np.float32))
+                # Specialize and load each module before beginning CUDA capture.
+                wp.launch(reader, 4, inputs=[source], outputs=[out], device=device)
+                with wp.ScopedCapture(device=device, force_module_load=False) as capture:
+                    wp.launch(reader, 4, inputs=[source], outputs=[out], device=device)
+                storage.assign(np.arange(1, 5, dtype=np.float32) + 10.0)
+                out.zero_()
+                wp.capture_launch(capture.graph)
+                np.testing.assert_allclose(out.numpy(), (expected + 10.0) * 2.0)
+
+
+def test_interoperability_aliases(test, device):
+    a = TaggedArray([1.0, 2.0, 3.0], tag="interop", dtype=float, device=device)
+    restored = wp.from_dlpack(wp.to_dlpack(a))
+    test.assertEqual(restored.ptr, a.ptr)
+    test.assertIsInstance(restored, wp.array)
+    if device.is_cpu:
+        view = np.asarray(a)
+        test.assertEqual(view.ctypes.data, a.ptr)
+
+
 devices = get_test_devices()
 cuda_devices = get_selected_cuda_test_devices()
 
+add_function_test(TestArraySubclass, "test_launch_kernels", test_launch_concrete_and_generic_kernels, devices=devices)
+add_function_test(TestArraySubclass, "test_launch_outputs", test_launch_with_subclass_outputs, devices=devices)
+add_function_test(
+    TestArraySubclass, "test_shared_specialization", test_specialization_is_shared_with_parent, devices=devices
+)
 add_function_test(TestArraySubclass, "test_shared_explicit_overload", test_explicit_overload_is_shared, devices=devices)
+add_function_test(TestArraySubclass, "test_validation", test_validation_errors, devices=devices)
+add_function_test(TestArraySubclass, "test_external_interfaces", test_external_array_interface_objects, devices=devices)
+add_function_test(TestArraySubclass, "test_null_arrays", test_null_arrays_and_descriptors, devices=devices)
+add_function_test(TestArraySubclass, "test_gradients_tape", test_gradients_and_tape, devices=devices)
+add_function_test(TestArraySubclass, "test_overwrite_gradient_parity", test_overwrite_gradient_parity, devices=devices)
+add_function_test(
+    TestArraySubclass, "test_gradient_subclasses", test_gradient_arrays_may_be_subclasses, devices=devices
+)
 add_function_test(TestArraySubclass, "test_function_overloads", test_python_function_overloads, devices=devices)
 add_function_test(TestArraySubclass, "test_sequence_overloads", test_sequence_array_overloads, devices=devices)
+add_function_test(TestArraySubclass, "test_structs", test_struct_fields, devices=devices)
+add_function_test(
+    TestArraySubclass, "test_struct_descriptor_errors", test_struct_descriptor_errors_preserve_field, devices=devices
+)
+add_function_test(TestArraySubclass, "test_descriptor_validation", test_subclass_descriptor_validation, devices=devices)
+add_function_test(
+    TestArraySubclass, "test_wrong_family_interface", test_wrong_family_does_not_use_external_interface, devices=devices
+)
 add_function_test(TestArraySubclass, "test_defaults", test_function_defaults, devices=devices)
+add_function_test(TestArraySubclass, "test_views", test_array_views_in_kernels, devices=devices)
+add_function_test(TestArraySubclass, "test_dtypes", test_vector_dtypes_and_dimensions, devices=devices)
+add_function_test(TestArraySubclass, "test_struct_bfloat16", test_struct_and_bfloat16_dtypes, devices=devices)
+add_function_test(TestArraySubclass, "test_host_operations", test_host_operations_keep_identity, devices=devices)
+add_function_test(TestArraySubclass, "test_launch_command", test_launch_command_parameter_replacement, devices=devices)
+add_function_test(TestArraySubclass, "test_sgd_overloads", test_sgd_live_overload_descriptors, devices=devices)
+add_function_test(TestArraySubclass, "test_subprocess_cache", test_subprocess_specialization_cache, devices=devices)
+add_function_test(TestArraySubclass, "test_cross_device", test_cross_device_access_modes, devices=cuda_devices)
+add_function_test(TestArraySubclass, "test_apic_descriptors", test_apic_rejects_redirected_descriptors, devices=devices)
+add_function_test(TestArraySubclass, "test_capture", test_graph_capture_replay, devices=cuda_devices)
+add_function_test(TestArraySubclass, "test_interop", test_interoperability_aliases, devices=devices)
 
 
 if __name__ == "__main__":
