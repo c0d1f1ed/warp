@@ -26,6 +26,8 @@ import warp as wp
 import warp._src.codegen as codegen
 import warp._src.context as context
 import warp._src.types as wptypes
+import warp.autograd as autograd
+import warp.fem as fem
 from warp.tests.test_fabricarray import _create_fabric_array_interface
 from warp.tests.unittest_utils import (
     add_function_test,
@@ -388,6 +390,11 @@ def row_view_kernel(a: wp.array2d[Any], out: wp.array[Any]):
 # ---------------------------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------------------------
+
+
+@fem.integrand
+def subclass_sample_value(s: fem.Sample):
+    return float(s.qp_index) + 1.0
 
 
 def make_families(device, classes=(TaggedArray, TaggedIndexedArray, TaggedFabricArray, TaggedIndexedFabricArray)):
@@ -1077,6 +1084,129 @@ def test_gradient_arrays_may_be_subclasses(test, device):
     test.assertEqual(tuple(packed.shape)[: packed.ndim], adjoint.shape)
 
 
+def test_gradcheck_and_jacobian(test, device):
+    source = TaggedArray([1.0, 2.0, 3.0], tag="gradcheck input", dtype=float, device=device, requires_grad=True)
+    output = SecondTaggedArray(tag="gradcheck output", shape=3, dtype=float, device=device, requires_grad=True)
+    test.assertTrue(
+        autograd.gradcheck(
+            square_float,
+            dim=3,
+            inputs=[source],
+            outputs=[output],
+            eps=1.0e-3,
+            show_summary=False,
+            device=device,
+        )
+    )
+    jacobians = autograd.jacobian(square_float, dim=3, inputs=[source], outputs=[output], device=device)
+    np.testing.assert_allclose(jacobians[0, 0].numpy(), np.diag([2.0, 4.0, 6.0]))
+
+
+def test_array_operators(test, device):
+    for index in range(len(FAMILIES)):
+        # The family views share storage; use a fresh owner before each in-place operation.
+        families = make_families(device)
+        array, expected, _ = families[index]
+        with test.subTest(family=type(array).__name__):
+            before = constructor_calls.copy()
+            np.testing.assert_allclose((array - 2.0).numpy(), expected - 2.0)
+            np.testing.assert_allclose((12.0 / array).numpy(), 12.0 / expected)
+            np.testing.assert_allclose((-array).numpy(), -expected)
+            original = array
+            array += 2.0
+            test.assertIs(array, original)
+            np.testing.assert_allclose(array.numpy(), expected + 2.0)
+            test.assertEqual(constructor_calls, before)
+
+
+def test_fem_interpolate_cache(test, device):
+    domain = fem.Cells(fem.Grid2D(res=(2, 2)))
+    destinations = (
+        wp.empty(4, dtype=float, device=device),
+        LeftArray(tag="left destination", shape=4, dtype=float, device=device),
+        RightArray(tag="right destination", shape=4, dtype=float, device=device),
+    )
+    kernels = []
+    for destination in destinations:
+        fem.interpolate(subclass_sample_value, dest=destination, at=domain, dim=4, device=device)
+        np.testing.assert_allclose(destination.numpy(), [1.0, 2.0, 3.0, 4.0])
+        test.assertEqual(len(subclass_sample_value.cached_kernels), 1)
+        kernels.append(next(iter(subclass_sample_value.cached_kernels.values()))[0])
+    test.assertIs(kernels[0], kernels[1])
+    test.assertIs(kernels[0], kernels[2])
+
+
+def test_map_inputs_and_outputs(test, device):
+    for array, expected, _ in make_families(device):
+        with test.subTest(cls=type(array).__name__):
+            before = constructor_calls.copy()
+            result = wp.map(square_element, array)
+            test.assertIsInstance(result, wp.array)
+            assert_np_equal(result.numpy(), expected**2)
+
+            explicit = TaggedArray(tag="output", shape=4, dtype=float, device=device)
+            test.assertIs(wp.map(square_element, array, out=explicit), explicit)
+            test.assertEqual(constructor_calls, before + collections.Counter({"TaggedArray": 1}))
+            assert_np_equal(explicit.numpy(), expected**2)
+
+    for output, _, _ in make_families(device):
+        with test.subTest(output=type(output).__name__):
+            source = wp.array([1.0, 2.0, 3.0, 4.0], dtype=float, device=device)
+            test.assertIs(wp.map(square_element, source, out=output), output)
+            assert_np_equal(output.numpy(), np.array([1.0, 4.0, 9.0, 16.0]))
+
+    # broadcasting, tuple outputs and the operators that are implemented with map
+    a = TaggedArray(np.arange(6, dtype=np.float32).reshape(2, 3), tag="a", dtype=float, device=device)
+    b = SecondTaggedArray(np.array([[10.0], [20.0]], dtype=np.float32), tag="b", dtype=float, device=device)
+    total = wp.map(add_elements, a, b)
+    assert_np_equal(total.numpy(), np.arange(6).reshape(2, 3) + np.array([[10.0], [20.0]]))
+
+    first = TaggedArray(tag="first", shape=(2, 3), dtype=float, device=device)
+    second = SecondTaggedArray(tag="second", shape=(2, 3), dtype=float, device=device)
+    results = wp.map(split_element, a, out=[first, second])
+    test.assertIs(results[0], first)
+    test.assertIs(results[1], second)
+    assert_np_equal(first.numpy(), a.numpy() + 1.0)
+    assert_np_equal(second.numpy(), a.numpy() * 2.0)
+    assert_np_equal((a + a).numpy(), a.numpy() * 2.0)
+
+
+def test_map_kernels_are_cached_by_native_family(test, device):
+    a = TaggedArray([1.0, 2.0], tag="first", dtype=float, device=device)
+    b = SecondTaggedArray([3.0, 4.0], tag="second", dtype=float, device=device)
+    parent = wp.clone(a)
+    tagged_out = TaggedArray(tag="out", shape=2, dtype=float, device=device)
+    first = wp.map(square_element, a, return_kernel=True)
+    test.assertIs(wp.map(square_element, b, out=tagged_out, return_kernel=True), first)
+    test.assertIs(wp.map(square_element, parent, out=parent, return_kernel=True), first)
+
+    # unrelated families remain distinct even when the Python classes carry the same name
+    same_name_regular = type("Same", (TaggedArray,), {})(tag="a", data=[1.0, 2.0, 3.0, 4.0], dtype=float, device=device)
+    same_name_indexed = type("Same", (TaggedIndexedArray,), {})(
+        tag="i", data=same_name_regular, indices=wp.array([3, 1, 0, 2], dtype=wp.int32, device=device)
+    )
+    regular_kernel = wp.map(square_element, same_name_regular, return_kernel=True)
+    indexed_kernel = wp.map(square_element, same_name_indexed, return_kernel=True)
+    test.assertIsNot(regular_kernel, indexed_kernel)
+    assert_np_equal(wp.map(square_element, same_name_indexed).numpy(), np.array([16.0, 4.0, 1.0, 9.0]))
+    assert_np_equal(wp.map(square_element, same_name_regular).numpy(), np.array([1.0, 4.0, 9.0, 16.0]))
+
+
+def test_map_literal_names(test, device):
+    @wp.func
+    def Literal(value: float):
+        return value + 1.0
+
+    @wp.func
+    def named_argument(Literal: float):
+        return Literal * 2.0
+
+    source = TaggedArray(np.arange(6, dtype=np.float32).reshape(2, 3), tag="rank two", dtype=float, device=device)
+    np.testing.assert_allclose(wp.map(Literal, source).numpy(), source.numpy() + 1.0)
+    indexed, expected, _ = make_families(device)[1]
+    np.testing.assert_allclose(wp.map(named_argument, indexed).numpy(), expected * 2.0)
+
+
 def test_python_function_overloads(test, device):
     a = TaggedArray([1.0, 2.0], tag="first", dtype=float, device=device)
     b = SecondTaggedArray([3.0, 4.0], tag="second", dtype=float, device=device)
@@ -1422,6 +1552,37 @@ def test_host_operations_keep_identity(test, device):
     assert_np_equal(converted.numpy(), np.array([1, 2, 3]))
 
 
+def test_strided_empty_and_high_rank_arrays(test, device):
+    base = wp.array(np.arange(1, 9, dtype=np.float32), dtype=float, device=device)
+    view = base[::2]
+    strided = TaggedArray(
+        ptr=view.ptr,
+        dtype=float,
+        shape=view.shape,
+        strides=view.strides,
+        capacity=base.capacity,
+        device=device,
+        tag="strided",
+    )
+    test.assertFalse(strided.is_contiguous)
+    out = wp.zeros(4, dtype=float, device=device)
+    wp.launch(read_regular, 4, inputs=[strided], outputs=[out], device=device)
+    assert_np_equal(out.numpy(), view.numpy() * 2.0)
+    wp.launch(square, 4, inputs=[strided], outputs=[out], device=device)
+    assert_np_equal(out.numpy(), view.numpy() ** 2)
+    destination = TaggedArray(tag="destination", shape=4, dtype=float, device=device)
+    wp.copy(destination, strided)
+    assert_np_equal(destination.numpy(), view.numpy())
+
+    empty = TaggedArray(tag="empty", shape=0, dtype=float, device=device)
+    wp.launch(read_regular, 0, inputs=[empty], outputs=[empty], device=device)
+    wp.launch(square, 0, inputs=[empty], outputs=[empty], device=device)
+    test.assertEqual(wp.map(square_element, empty).shape, (0,))
+
+    four_d = TaggedArray(np.arange(16, dtype=np.float32).reshape(2, 2, 2, 2), tag="4d", dtype=float, device=device)
+    assert_np_equal(wp.map(square_element, four_d).numpy(), np.arange(16, dtype=np.float32).reshape(2, 2, 2, 2) ** 2)
+
+
 def test_launch_command_parameter_replacement(test, device):
     a = TaggedArray([1.0, 2.0], tag="a", dtype=float, device=device)
     b = SecondTaggedArray([10.0, 20.0], tag="b", dtype=float, device=device)
@@ -1440,6 +1601,39 @@ def test_launch_command_parameter_replacement(test, device):
         command.set_param_at_index(0, make_families(device)[1][0])
 
 
+def test_library_caches_do_not_retain_arrays(test, device):
+    out = wp.empty(2, dtype=float, device=device)
+
+    def check(make_array, use):
+        array = make_array()
+        reference = weakref.ref(array)
+        use(array)
+        del array
+        gc.collect()
+        test.assertIsNone(reference())
+
+    check(
+        lambda: TaggedArray([1.0, 2.0], tag="r", dtype=float, device=device),
+        lambda a: wp.launch(square, 2, inputs=[a], outputs=[out], device=device),
+    )
+    check(
+        lambda: TaggedArray([1.0, 2.0], tag="r", dtype=float, device=device),
+        lambda a: (identify_generic_array(a), identify_array(a)),
+    )
+    check(
+        lambda: SecondTaggedArray([1.0, 2.0], tag="r", dtype=float, device=device),
+        lambda a: wp.map(square_element, a),
+    )
+    check(
+        lambda: make_families(device)[1][0],
+        lambda a: wp.map(square_element, a),
+    )
+    check(
+        lambda: TaggedArray([1.0, 2.0], tag="live overload", dtype=float, device=device),
+        lambda a: wp.overload(copy_generic, [a, out]),
+    )
+
+
 def test_sgd_live_overload_descriptors(test, device):
     from warp.optim import SGD  # noqa: PLC0415
 
@@ -1453,6 +1647,58 @@ def test_sgd_live_overload_descriptors(test, device):
     del parameter, optimizer
     gc.collect()
     test.assertIsNone(parameter_ref())
+
+
+def test_class_reassignment_uses_real_family(test, device):
+    def forbidden_constructor(self, *args, **kwargs):
+        raise AssertionError("Warp called the constructor of a reassigned array subclass")
+
+    families = make_families(device)
+    families[0][0].requires_grad = True
+    families[0][0].retain_grad = True
+    for family, (source, expected, kernel) in zip(FAMILIES, families, strict=True):
+        source.__class__ = family
+        source.metadata = object()
+        metadata = source.metadata
+        descriptor = bytes(source.__ctype__())
+        cls = type(f"Reassigned{family.__name__}", (family,), {"__init__": forbidden_constructor})
+        for state, target in (("promoted", cls), ("restored", family)):
+            with test.subTest(family=family.__name__, state=state):
+                source.__class__ = target
+                test.assertIs(wptypes.concrete_array_type(source), family)
+                destination = wp.empty(4, dtype=float, device=device)
+                for reader in (kernel, GENERIC_KERNEL_BY_FAMILY[family]):
+                    wp.launch(reader, 4, inputs=[source], outputs=[destination], device=device)
+                    np.testing.assert_allclose(destination.numpy(), expected * 2.0)
+                np.testing.assert_allclose(wp.map(square_element, source).numpy(), expected**2)
+                test.assertIs(source.metadata, metadata)
+                test.assertEqual(bytes(context.pack_arg(kernel, family[float], "a", source, device)), descriptor)
+
+
+def test_hidden_mro_launch_parity(test, device):
+    bases = (TaggedArray, TaggedIndexedArray, TaggedFabricArray, TaggedIndexedFabricArray)
+    for meta in (HiddenMroMeta, PropertyMroMeta):
+        classes = tuple(meta(f"Hidden{base.__name__}", (base,), {}) for base in bases)
+        families = make_families(device, classes)
+        for family, (source, expected, kernel) in zip(FAMILIES, families, strict=True):
+            with test.subTest(metaclass=meta.__name__, family=family.__name__):
+                destination = wp.empty(4, dtype=float, device=device)
+                for reader in (kernel, GENERIC_KERNEL_BY_FAMILY[family]):
+                    wp.launch(reader, 4, inputs=[source], outputs=[destination], device=device)
+                    np.testing.assert_allclose(destination.numpy(), expected * 2.0)
+                np.testing.assert_allclose(wp.map(square_element, source).numpy(), expected**2)
+
+        # This overwrite chain observes both the gradient pointer and retain flag.
+        source = families[0][0]
+        source.requires_grad = True
+        source.retain_grad = True
+        loss = wp.zeros(1, dtype=float, device=device, requires_grad=True)
+        with wp.Tape() as tape:
+            wp.launch(double_in_place, 4, inputs=[source], device=device)
+            wp.launch(double_in_place, 4, inputs=[source], device=device)
+            wp.launch(sum_values, 4, inputs=[source, loss], device=device)
+        tape.backward(loss=loss)
+        np.testing.assert_allclose(source.grad.numpy(), np.full(4, 9.0))
 
 
 def test_subprocess_specialization_cache(test, device):
@@ -1486,6 +1732,49 @@ def test_subprocess_specialization_cache(test, device):
         test.assertEqual(records[0]["module_hash"], records[1]["module_hash"])
         test.assertEqual(records[0]["wrong_family_rejections"], 3)
         test.assertEqual(records[1]["wrong_family_rejections"], 3)
+
+
+def test_no_constructor_calls(test, device):
+    class StrictArray(TaggedArray):
+        allowed = True
+
+        def __init__(self, *args, **kwargs):
+            if not StrictArray.allowed:
+                raise AssertionError("Warp called the constructor of a user subclass")
+            super().__init__(*args, **kwargs)
+
+    values = StrictArray(tag="in", data=[1.0, 2.0], dtype=float, device=device)
+    result = StrictArray(tag="out", shape=2, dtype=float, device=device)
+    StrictArray.allowed = False
+    try:
+        wp.launch(square, 2, inputs=[values], outputs=[result], device=device)
+        wp.launch(read_any, 2, inputs=[values], outputs=[wp.empty(2, dtype=float, device=device)], device=device)
+        wp.map(square_element, values)
+        wp.map(square_element, values, out=result)
+        identify_generic_array(values)
+        identify_array(values)
+        with wp.Tape():
+            wp.launch(square_float, 2, inputs=[values], outputs=[result], device=device)
+        context.pack_arg(read_regular, wp.array[float], "a", values, device)
+        wp.copy(result, values)
+        wp.clone(values)
+        wp.empty_like(values)
+        values.numpy()
+        _ = values + values
+    finally:
+        StrictArray.allowed = True
+
+
+def test_exact_arrays_are_unchanged(test, device):
+    a = wp.array([1.0, 2.0, 3.0, 4.0], dtype=float, device=device)
+    out = wp.empty(4, dtype=float, device=device)
+    for kernel in (read_regular, read_any, read_generic_regular):
+        wp.launch(kernel, 4, inputs=[a], outputs=[out], device=device)
+        assert_np_equal(out.numpy(), a.numpy() * 2.0)
+    assert_np_equal(wp.map(square_element, a).numpy(), a.numpy() ** 2)
+    test.assertIs(identify_array(a), a)
+    with test.assertRaisesRegex(RuntimeError, "dtype"):
+        wp.launch(read_regular, 2, inputs=[wp.zeros(2, dtype=wp.int32, device=device)], outputs=[out], device=device)
 
 
 def test_cross_device_access_modes(test, device):
@@ -1598,6 +1887,12 @@ add_function_test(TestArraySubclass, "test_overwrite_gradient_parity", test_over
 add_function_test(
     TestArraySubclass, "test_gradient_subclasses", test_gradient_arrays_may_be_subclasses, devices=devices
 )
+add_function_test(TestArraySubclass, "test_gradcheck", test_gradcheck_and_jacobian, devices=devices)
+add_function_test(TestArraySubclass, "test_operators", test_array_operators, devices=devices)
+add_function_test(TestArraySubclass, "test_fem_cache", test_fem_interpolate_cache, devices=devices)
+add_function_test(TestArraySubclass, "test_map", test_map_inputs_and_outputs, devices=devices)
+add_function_test(TestArraySubclass, "test_map_cache", test_map_kernels_are_cached_by_native_family, devices=devices)
+add_function_test(TestArraySubclass, "test_map_literal_names", test_map_literal_names, devices=devices)
 add_function_test(TestArraySubclass, "test_function_overloads", test_python_function_overloads, devices=devices)
 add_function_test(TestArraySubclass, "test_sequence_overloads", test_sequence_array_overloads, devices=devices)
 add_function_test(TestArraySubclass, "test_structs", test_struct_fields, devices=devices)
@@ -1613,9 +1908,17 @@ add_function_test(TestArraySubclass, "test_views", test_array_views_in_kernels, 
 add_function_test(TestArraySubclass, "test_dtypes", test_vector_dtypes_and_dimensions, devices=devices)
 add_function_test(TestArraySubclass, "test_struct_bfloat16", test_struct_and_bfloat16_dtypes, devices=devices)
 add_function_test(TestArraySubclass, "test_host_operations", test_host_operations_keep_identity, devices=devices)
+add_function_test(TestArraySubclass, "test_layouts", test_strided_empty_and_high_rank_arrays, devices=devices)
 add_function_test(TestArraySubclass, "test_launch_command", test_launch_command_parameter_replacement, devices=devices)
+add_function_test(TestArraySubclass, "test_retention", test_library_caches_do_not_retain_arrays, devices=devices)
 add_function_test(TestArraySubclass, "test_sgd_overloads", test_sgd_live_overload_descriptors, devices=devices)
+add_function_test(
+    TestArraySubclass, "test_class_reassignment", test_class_reassignment_uses_real_family, devices=devices
+)
+add_function_test(TestArraySubclass, "test_hidden_mro_launch", test_hidden_mro_launch_parity, devices=devices)
 add_function_test(TestArraySubclass, "test_subprocess_cache", test_subprocess_specialization_cache, devices=devices)
+add_function_test(TestArraySubclass, "test_constructors", test_no_constructor_calls, devices=devices)
+add_function_test(TestArraySubclass, "test_exact_arrays", test_exact_arrays_are_unchanged, devices=devices)
 add_function_test(TestArraySubclass, "test_cross_device", test_cross_device_access_modes, devices=cuda_devices)
 add_function_test(TestArraySubclass, "test_apic_descriptors", test_apic_rejects_redirected_descriptors, devices=devices)
 add_function_test(TestArraySubclass, "test_capture", test_graph_capture_replay, devices=cuda_devices)
