@@ -34,6 +34,22 @@ def cpu_linear_array_loop_kernel(a: wp.array[float], output: wp.array[float]):
         output[i] = a[i] * 2.0 + 1.0
 
 
+@wp.kernel(
+    module="unique",
+    module_options={
+        "enable_backward": False,
+        "optimization_level": 2,
+        "cpu_compiler_flags": "-march=native -fno-vectorize",
+    },
+)
+def cpu_linear_array_loop_opt_out_kernel(a: wp.array[float], output: wp.array[float]):
+    row = wp.tid()
+    begin = row * LOOP_COLUMNS
+    for column in range(LOOP_COLUMNS):
+        i = begin + column
+        output[i] = a[i] * 2.0 + 1.0
+
+
 @wp.kernel(module="unique", module_options={"max_unroll": 1})
 def cpu_generic_constant_range_kernel(values: wp.array[Any]):
     row = wp.tid()
@@ -84,6 +100,23 @@ class TestCpuVectorization(unittest.TestCase):
         output_base_np = output_base.numpy()
         np.testing.assert_allclose(output_base_np[::2], values_np * 2.0 + 1.0)
         np.testing.assert_array_equal(output_base_np[1::2], np.full(len(values_np), -100.0, dtype=np.float32))
+
+    def test_linear_array_loop_opt_out(self):
+        """The embedded Clang frontend accepts the loop vectorizer opt-out."""
+        values_np = np.linspace(-2.0, 3.0, LOOP_COLUMNS, dtype=np.float32)
+        values = wp.array(values_np, dtype=float, device="cpu")
+        output = wp.empty_like(values)
+
+        self.assertIn("-fno-vectorize", cpu_linear_array_loop_opt_out_kernel.module.options["cpu_compiler_flags"])
+        wp.launch(
+            cpu_linear_array_loop_opt_out_kernel,
+            dim=1,
+            inputs=[values],
+            outputs=[output],
+            device="cpu",
+            block_dim=1,
+        )
+        np.testing.assert_allclose(output.numpy(), values_np * 2.0 + 1.0)
 
     def test_contiguous_specialization_preserves_aliasing(self):
         rows = 2

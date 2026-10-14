@@ -14,7 +14,7 @@ Enabling the pass alone is insufficient for common kernels. A generic scalar `wp
 
 ### Enable the loop pass
 
-`warp/native/clang/clang.cpp` enables `CodeGenOptions::VectorizeLoop` for CPU compilation at effective optimization level 2 or 3. Debug builds and lower optimization levels retain their existing behavior. A module can opt out with `-fno-vectorize` in `cpu_compiler_flags`; Warp handles this driver-style flag because it calls the frontend directly. CUDA compilation is unaffected.
+`warp/native/clang/clang.cpp` enables `CodeGenOptions::VectorizeLoop` for CPU compilation at effective optimization level 2 or 3. Debug builds and lower optimization levels retain their existing behavior. A module can opt out with `-fno-vectorize` in `cpu_compiler_flags`; Warp handles this driver-style flag because it calls the frontend directly. This disables only LLVM's CPU loop vectorizer. Constant-range lowering and eligible CPU source specialization still apply. The pass switch does not affect CUDA compilation, but the shared constant-range lowering changes generated CUDA source.
 
 LLVM still decides which loops to vectorize, the profitable vector width, and whether to use scalar remainders. This change does not enable floating-point reassociation or promise a particular instruction set.
 
@@ -39,6 +39,8 @@ SLP vectorization is addressed in a separate change.
 `TestCpuVectorization` checks contiguous and strided one dimensional arrays, in-place and overlapping access, fast-path eligibility, and forward and backward constant-range behavior. `TestCpuBlockCodegen` checks serial and cooperative CPU source generation. `TestCodeGen` covers range edge cases across devices, and `TestFuncInline` checks generated helper attributes. These tests assert correctness and source structure without timing assertions.
 
 The CPU ASV `time_linear_array_loop_arithmetic` case measures a fixed-size unit-stride loop. Broader ASV, Newton, and application workloads are measured separately to check runtime, code generation time, and fallback paths.
+
+An isolated comparison of the shared constant-range lowering on an RTX 5080 found matching status for 57 runnable Newton CUDA examples. Rechecks of the apparent runtime outliers found no material performance change in those workloads, even though their generated CUDA source can differ.
 
 ## Tradeoffs
 
