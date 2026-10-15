@@ -8722,8 +8722,11 @@ def codegen_module(kernel, device, options):
                 backward_conditions.append(f"_wp_args->{arg.label}.strides[0] == (int)sizeof({dtype})")
                 backward_conditions.append(f"_wp_adj_args->{arg.label}.strides[0] == (int)sizeof({dtype})")
 
-            forward_condition = " && ".join(forward_conditions)
-            backward_condition = " && ".join(backward_conditions)
+            # Read independent packed stride checks eagerly. A short-circuit chain can
+            # make LLVM classify the contiguous task loop as cold and prevent inlining.
+            # Retain the outer coordinate short circuit.
+            forward_condition = " & ".join(f"({condition})" for condition in forward_conditions)
+            backward_condition = " & ".join(f"({condition})" for condition in backward_conditions)
             template_fmt_args["forward_dispatch"] = (
                 f"    const bool wp_linear_contiguous = dim->coord_mult == 1 && ({forward_condition});\n"
                 "    if (wp_linear_contiguous)\n"
