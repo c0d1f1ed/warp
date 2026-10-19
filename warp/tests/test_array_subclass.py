@@ -387,14 +387,14 @@ def row_view_kernel(a: wp.array2d[Any], out: wp.array[Any]):
     out[i] = row[0]
 
 
-# ---------------------------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------------------------
-
-
 @fem.integrand
 def subclass_sample_value(s: fem.Sample):
     return float(s.qp_index) + 1.0
+
+
+# ---------------------------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------------------------
 
 
 def make_families(device, classes=(TaggedArray, TaggedIndexedArray, TaggedFabricArray, TaggedIndexedFabricArray)):
@@ -485,6 +485,34 @@ class TestArraySubclass(unittest.TestCase):
                 instance.shape = (1,)
                 self.assertIn(cls.__name__, wptypes.type_repr(instance))
 
+    def test_fixedarray_host_values_leave_overloads_unchanged(self):
+        @wp.kernel(module="unique", enable_backward=False)
+        def read(a: wp.array[Any], out: wp.array[float]):
+            out[0] = a[0]
+
+        out = wp.empty(1, dtype=float, device=self.cpu)
+        for specialized in (False, True):
+            if specialized:
+                wp.launch(read, 1, inputs=[wp.ones_like(out)], outputs=[out], device=self.cpu)
+                np.testing.assert_array_equal(out.numpy(), [1.0])
+            overloads = dict(read.overloads)
+            module_hash = read.module.hash_module()
+            # A regression must fail without compiling an incompatible descriptor.
+            with mock.patch.object(
+                read.module, "load", side_effect=AssertionError("Invalid host value reached compilation")
+            ):
+                for cls in (wp.fixedarray, FixedChild):
+                    value = cls(dtype=float, shape=1)
+                    with self.subTest(specialized=specialized, cls=cls.__name__):
+                        with self.assertRaisesRegex(TypeError, "fixedarray"):
+                            wp.launch(read, 1, inputs=[value], outputs=[out], device=self.cpu)
+                        for descriptors in ([value, wp.array[float]], {"a": value, "out": wp.array[float]}):
+                            with self.assertRaisesRegex(TypeError, "fixedarray"):
+                                wp.overload(read, descriptors)
+                        self.assertEqual(read.overloads, overloads)
+                        self.assertEqual(read.module.hash_module(), module_hash)
+
+
     def test_fixedarray_remains_a_distinct_compiler_type(self):
         class RaisingFixedArray(wp.fixedarray):
             def __init__(self, *args, **kwargs):
@@ -500,18 +528,48 @@ class TestArraySubclass(unittest.TestCase):
                     self.assertFalse(wptypes.types_equal(value, template))
                     self.assertEqual(wptypes.get_type_code(value), f"a{len(shape)}f4")
                     self.assertTrue(wptypes.type_matches_template(value, template))
-                    # These are compiler-only descriptors, including the None
-                    # template path; inference must retain their fixed extents.
-                    for argument in (value, None):
-                        inferred = wptypes.infer_argument_types([argument], [value])[0]
-                        self.assertIs(type(inferred), wp.fixedarray)
-                        self.assertIs(inferred.dtype, wp.float32)
-                        self.assertEqual(inferred.ndim, len(shape))
-                        self.assertEqual(inferred.shape, shape)
-                        self.assertEqual(inferred.size, value.size)
-                        self.assertEqual(
-                            codegen.Var.type_to_ctype(inferred), f"wp::fixedarray_t<{value.size}, wp::float32>"
-                        )
+                    # A compiler template must retain its fixed extents without
+                    # calling an application constructor. It is not a host value.
+                    inferred = wptypes.infer_argument_types([None], [value])[0]
+                    self.assertIs(type(inferred), wp.fixedarray)
+                    self.assertIs(inferred.dtype, wp.float32)
+                    self.assertEqual(inferred.ndim, len(shape))
+                    self.assertEqual(inferred.shape, shape)
+                    self.assertEqual(inferred.size, value.size)
+                    self.assertEqual(
+                        codegen.Var.type_to_ctype(inferred), f"wp::fixedarray_t<{value.size}, wp::float32>"
+                    )
+                    for template in (value, Any, wp.array[Any]):
+                        with self.assertRaisesRegex(TypeError, "fixedarray"):
+                            wptypes.infer_argument_types([value], [template])
+
+    def test_fixedarray_subclass_source_annotations_are_rejected(self):
+        annotation = FixedChild(dtype=float, shape=4)
+
+        def invalid_kernel(a: annotation):
+            pass
+
+        def invalid_function(a: annotation):
+            return a
+
+        def invalid_return() -> annotation:
+            return wp.zeros(shape=4, dtype=float)
+
+        class InvalidStruct:
+            arr: annotation
+
+        for decorator, definition in (
+            (wp.kernel, invalid_kernel),
+            (wp.func, invalid_function),
+            (wp.func, invalid_return),
+            (wp.struct, InvalidStruct),
+        ):
+            with self.subTest(decorator=decorator.__name__, definition=definition.__name__):
+                module = wp.get_module(__name__)
+                module_hash = module.hash_module()
+                with self.assertRaisesRegex(TypeError, "fixedarray subclass instance as an annotation"):
+                    decorator(definition)
+                self.assertEqual(module.hash_module(), module_hash)
 
     def test_real_mro_inference(self):
         bases = (TaggedArray, TaggedIndexedArray, TaggedFabricArray, TaggedIndexedFabricArray)
@@ -1761,6 +1819,8 @@ def test_hidden_mro_launch_parity(test, device):
             wp.launch(sum_values, 4, inputs=[source, loss], device=device)
         tape.backward(loss=loss)
         np.testing.assert_allclose(source.grad.numpy(), np.full(4, 9.0))
+
+
 
 
 def test_subprocess_specialization_cache(test, device):

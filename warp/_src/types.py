@@ -5750,7 +5750,12 @@ def _normalize_array_argument_type(value):
     cls = type(value)
     if cls is type or cls is int or cls is float or cls is builtins.bool or issubclass(cls, _ArrayAnnotationBase):
         return value
-    annotation_cls = _ARRAY_ANNOTATION_MAP.get(_resolve_array_family(value))
+    family = _resolve_array_family(value)
+    if family is fixedarray:
+        raise TypeError(
+            "Cannot use wp.fixedarray as a host argument or kernel overload type; it is a compiler-only stack array"
+        )
+    annotation_cls = _ARRAY_ANNOTATION_MAP.get(family)
     if annotation_cls is None:
         return value
     return annotation_cls(value.dtype, value.ndim)
@@ -8487,8 +8492,12 @@ def infer_argument_types(args: list[Any], template_types, arg_names: list[str] |
             if annotation_cls is not None:
                 arg_types.append(annotation_cls(arg.dtype, arg.ndim))
             else:
-                # Preserve fixedarray's stack size without calling a user constructor.
-                arg_types.append(family(dtype=arg.dtype, shape=arg.shape))
+                # A fixedarray has the type code of a regular array but a different native layout.
+                # Reject host values before they can register a colliding specialization.
+                raise TypeError(
+                    f"Unable to infer the type of argument '{arg_name}', got a wp.fixedarray, "
+                    "a compiler-only type for stack arrays inside kernels"
+                )
         elif arg_type in scalar_and_bool_types:
             arg_types.append(arg_type)
         elif hasattr(arg_type, "_wp_scalar_type_"):

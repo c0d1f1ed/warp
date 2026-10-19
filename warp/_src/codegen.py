@@ -497,7 +497,7 @@ def _make_struct_field_constructor(field: str, var_type: type):
 
 
 def _validate_array_parameter_annotation(annotation, context):
-    """Keep runtime subclasses out of source-level array annotations."""
+    """Keep application subclasses out of source-level array annotations."""
     cls = type(annotation)
     if issubclass(cls, _ArrayAnnotationBase):
         return
@@ -505,6 +505,11 @@ def _validate_array_parameter_annotation(annotation, context):
         family = _resolve_array_family(annotation)
     except TypeError as error:
         raise TypeError(f"{context}: {error}") from error
+    if family is fixedarray and cls is not fixedarray:
+        raise TypeError(
+            f"{context} uses a fixedarray subclass instance as an annotation; "
+            "use a built-in wp.fixedarray type descriptor instead"
+        )
     if family in _ARRAY_ANNOTATION_MAP and cls is not family:
         raise TypeError(
             f"{context} uses an array subclass instance as an annotation; "
@@ -2057,6 +2062,8 @@ class Adjoint:
         for name, type in adj.arg_types.items():
             # skip return hint
             if name == "return":
+                if issubclass(builtins.type(type), fixedarray):
+                    _validate_array_parameter_annotation(type, f"Return annotation of '{adj.fun_name}'")
                 continue
 
             _validate_array_parameter_annotation(type, f"Argument '{name}' of '{adj.fun_name}'")
