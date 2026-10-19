@@ -420,7 +420,7 @@ def make_deep_families(device):
 
 
 # ---------------------------------------------------------------------------------------------
-# Pure Python tests (no device work)
+# CPU-only tests
 # ---------------------------------------------------------------------------------------------
 
 
@@ -605,9 +605,71 @@ class TestArraySubclass(unittest.TestCase):
             self.assertIn(type(instance).__name__, wptypes.type_repr(instance))
 
     def test_annotations_are_not_runtime_values(self):
-        # a lightweight annotation passed as a value is still not an array that can be inferred or launched
-        with self.assertRaisesRegex(TypeError, "Unable to infer"):
-            wptypes.infer_argument_types([wp.array[float]], [Any])
+        for family in FAMILIES:
+            for annotation in (family[float], family[Any], family[float, Literal[2]], family[Any, Literal[2]]):
+                with self.subTest(annotation=annotation):
+                    with self.assertRaisesRegex(TypeError, "Unable to infer"):
+                        wptypes.infer_argument_types([annotation], [Any])
+
+    def test_annotation_values_are_not_packed(self):
+        # Pack directly: an invalid descriptor must never reach a native launch.
+        for (_, _, kernel), family in zip(make_families(self.cpu), FAMILIES, strict=True):
+            for annotation in (family[float], family[Any], family[float, Literal[2]], family[Any, Literal[2]]):
+                for mode in wp.config.LaunchArrayAccessMode:
+                    for adjoint in (False, True):
+                        with self.subTest(annotation=annotation, mode=mode, adjoint=adjoint):
+                            prefix = "adjoint " if adjoint else ""
+                            message = (
+                                f"{prefix}argument 'a' expects an array of type .*"
+                                f"passed value has type {type(annotation).__name__}"
+                            )
+                            with mock.patch.object(wp.config, "launch_array_access_mode", mode):
+                                with self.assertRaisesRegex(RuntimeError, message):
+                                    context.pack_arg(kernel, family[float], "a", annotation, self.cpu, adjoint=adjoint)
+
+    def test_annotation_values_do_not_modify_struct_fields(self):
+        families = make_families(self.cpu)
+        families[0][0].requires_grad = True
+        fields = ("a", "ia", "fa", "ifa")
+        for family, field in zip(FAMILIES, fields, strict=True):
+            for annotation in (family[float], family[Any], family[float, Literal[2]], family[Any, Literal[2]]):
+                with self.subTest(field=field, annotation=annotation):
+                    bundle = ArrayBundle()
+                    for name, (array, _, _) in zip(fields, families, strict=True):
+                        setattr(bundle, name, array)
+                    descriptor = bytes(bundle.__ctype__())
+                    original = getattr(bundle, field)
+                    grad_refs = (bundle._a_grad, bundle._ia_grad)
+                    message = f"Struct field '{field}' expects a Warp .*array, got {type(annotation).__name__}"
+                    try:
+                        with self.assertRaisesRegex(TypeError, message):
+                            setattr(bundle, field, annotation)
+                    finally:
+                        # Rejection must preserve both the Python owners and the native storage.
+                        self.assertIs(getattr(bundle, field), original)
+                        self.assertEqual(bytes(bundle.__ctype__()), descriptor)
+                        self.assertIs(bundle._a_grad, grad_refs[0])
+                        self.assertIs(bundle._ia_grad, grad_refs[1])
+
+    def test_annotation_values_are_not_recorded_command_parameters(self):
+        for (array, expected, kernel), family in zip(make_families(self.cpu), FAMILIES, strict=True):
+            annotation = family[float]
+            out = wp.empty(4, dtype=float, device=self.cpu)
+            command = wp.launch(kernel, 4, inputs=[array], outputs=[out], device=self.cpu, record_cmd=True)
+            message = f"argument 'a' expects an array of type .*passed value has type {type(annotation).__name__}"
+            for parameter in ("name", "index"):
+                with self.subTest(family=family.__name__, parameter=parameter):
+                    with self.assertRaisesRegex(RuntimeError, message):
+                        if parameter == "name":
+                            command.set_param_by_name("a", annotation)
+                        else:
+                            command.set_param_at_index(0, annotation)
+                    # Only launch after replacement was rejected, so the descriptor remains valid.
+                    command.launch()
+                    np.testing.assert_allclose(out.numpy(), expected * 2.0)
+            with self.subTest(family=family.__name__, parameter="creation"):
+                with self.assertRaisesRegex(RuntimeError, message):
+                    wp.launch(kernel, 4, inputs=[annotation], outputs=[out], device=self.cpu, record_cmd=True)
 
     def test_subclass_instance_parameter_annotations_are_rejected(self):
         for annotation, _, _ in make_families(self.cpu):

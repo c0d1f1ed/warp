@@ -5714,6 +5714,8 @@ def _resolve_array_family(value) -> type | None:
 
     Unrelated native families cannot share a descriptor layout. Mixins and diamonds
     within one family are valid; ``fixedarray`` keeps its separate compiler type.
+    Lightweight annotations describe arrays but have no native array ancestor,
+    so they resolve to ``None``.
     """
     cls = type(value)
     if id(cls) in _ARRAY_FAMILY_IDS:
@@ -5723,9 +5725,6 @@ def _resolve_array_family(value) -> type | None:
     # an application metaclass overrides attribute lookup or equality.
     if not issubclass(cls, (indexedarray, fabricarray, indexedfabricarray, fixedarray, _ArrayAnnotationBase)):
         return array if issubclass(cls, array) else None
-
-    if issubclass(cls, _ArrayAnnotationBase):
-        return value._concrete_cls
 
     mro = _TYPE_MRO_DESCRIPTOR.__get__(cls)
     candidates = [ancestor for ancestor in mro if id(ancestor) in _ARRAY_FAMILY_IDS]
@@ -5823,7 +5822,7 @@ def _parse_array_subscript(cls, params):
 
 
 def array_type_id(a):
-    family = _resolve_array_family(a)
+    family = concrete_array_type(a)
     if family is array or family is fixedarray:
         return ARRAY_TYPE_REGULAR
     elif family is indexedarray:
