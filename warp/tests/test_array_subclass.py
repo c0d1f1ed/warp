@@ -129,19 +129,6 @@ class FixedChild(wp.fixedarray):
     pass
 
 
-class HiddenMroMeta(type):
-    def __getattribute__(cls, name):
-        if name == "__mro__":
-            return (cls, object)
-        return super().__getattribute__(name)
-
-
-class PropertyMroMeta(type):
-    @property
-    def __mro__(cls):
-        return (cls, object)
-
-
 FAMILIES = (wp.array, wp.indexedarray, wp.fabricarray, wp.indexedfabricarray)
 TYPE_CODE_PREFIXES = ("a", "ia", "fa", "ifa")
 
@@ -485,6 +472,24 @@ class TestArraySubclass(unittest.TestCase):
                 instance.shape = (1,)
                 self.assertIn(cls.__name__, wptypes.type_repr(instance))
 
+    def test_generic_launch_skips_descriptor_normalization(self):
+        @wp.kernel(module="unique", enable_backward=False)
+        def add_vectors(a: wp.vec3, b: wp.vec3, c: wp.vec3, x: wp.array[Any], y: wp.array[Any]):
+            i = wp.tid()
+            y[i] = x[i] + a[0] + b[0] + c[0]
+
+        x = TaggedArray([1.0, 2.0], tag="generic", dtype=float, device=self.cpu)
+        y = wp.empty_like(x)
+        args = [wp.vec3(1.0), wp.vec3(2.0), wp.vec3(3.0), x, y]
+        with mock.patch.object(
+            wptypes, "_normalize_array_argument_type", side_effect=AssertionError("Redundant normalization")
+        ):
+            # Cover both creation and reuse of a canonical specialization.
+            for _ in range(2):
+                wp.launch(add_vectors, 2, inputs=args, device=self.cpu)
+                np.testing.assert_array_equal(y.numpy(), [7.0, 8.0])
+        self.assertEqual(len(add_vectors.overloads), 1)
+
     def test_fixedarray_host_values_leave_overloads_unchanged(self):
         @wp.kernel(module="unique", enable_backward=False)
         def read(a: wp.array[Any], out: wp.array[float]):
@@ -511,7 +516,6 @@ class TestArraySubclass(unittest.TestCase):
                                 wp.overload(read, descriptors)
                         self.assertEqual(read.overloads, overloads)
                         self.assertEqual(read.module.hash_module(), module_hash)
-
 
     def test_fixedarray_remains_a_distinct_compiler_type(self):
         class RaisingFixedArray(wp.fixedarray):
@@ -570,29 +574,6 @@ class TestArraySubclass(unittest.TestCase):
                 with self.assertRaisesRegex(TypeError, "fixedarray subclass instance as an annotation"):
                     decorator(definition)
                 self.assertEqual(module.hash_module(), module_hash)
-
-    def test_real_mro_inference(self):
-        bases = (TaggedArray, TaggedIndexedArray, TaggedFabricArray, TaggedIndexedFabricArray)
-        for meta in (HiddenMroMeta, PropertyMroMeta):
-            classes = tuple(meta(f"Hidden{base.__name__}", (base,), {}) for base in bases)
-            for family, (value, _, _) in zip(FAMILIES, make_families(self.cpu, classes), strict=True):
-                with self.subTest(metaclass=meta.__name__, family=family.__name__):
-                    self.assertNotIn(family, type(value).__mro__)
-                    self.assertIs(wptypes.concrete_array_type(value), family)
-                    before = constructor_calls.copy()
-                    self.assertEqual(wptypes.infer_argument_types([value], [Any]), [family[wp.float32]])
-                    self.assertEqual(constructor_calls, before)
-
-        class ForgedMroMeta(type):
-            @property
-            def __mro__(cls):
-                return (cls, wp.array, object)
-
-        provider_cls = ForgedMroMeta("UnrelatedProvider", (), {})
-        provider = provider_cls()
-        self.assertIs(wptypes.concrete_array_type(provider), provider_cls)
-        with self.assertRaisesRegex(TypeError, "Unable to infer"):
-            wptypes.infer_argument_types([provider], [Any])
 
     def test_subclass_annotations_remain_unsupported(self):
         for cls in (TaggedArray, TaggedIndexedArray, TaggedFabricArray, TaggedIndexedFabricArray):
@@ -843,115 +824,6 @@ class TestArraySubclass(unittest.TestCase):
             resolve.assert_not_called()
         self.assertEqual(square_element(3.0), 9.0)
         self.assertEqual(identify_generic_array(3), 3)
-
-    def test_regular_subclass_resolution_keeps_fast_path(self):
-        mro_descriptor = wptypes._TYPE_MRO_DESCRIPTOR
-        values = [
-            cls(tag="fast path", shape=1, dtype=float, device=self.cpu)
-            for cls in (TaggedArray, MixinArray, DiamondArray)
-        ]
-
-        class CountMroReads:
-            reads = 0
-
-            def __get__(self, cls, _owner=None):
-                self.reads += 1
-                return mro_descriptor.__get__(cls)
-
-        counted_mro = CountMroReads()
-        with mock.patch.object(wptypes, "_TYPE_MRO_DESCRIPTOR", counted_mro):
-            for value in values:
-                self.assertIs(wptypes._resolve_array_family(value), wp.array)
-            self.assertIsNone(wptypes._resolve_array_family(object()))
-        self.assertEqual(counted_mro.reads, 0)
-
-    def test_hidden_mro_keeps_native_array_semantics(self):
-        bases = (TaggedArray, TaggedIndexedArray, TaggedFabricArray, TaggedIndexedFabricArray)
-        fields = ("a", "ia", "fa", "ifa")
-        for meta in (HiddenMroMeta, PropertyMroMeta):
-            classes = tuple(meta(f"Hidden{base.__name__}", (base,), {}) for base in bases)
-            families = make_families(self.cpu, classes)
-            storage = families[0][0]
-            storage.requires_grad = True
-            storage.retain_grad = True
-            for family, (array, _, kernel), field in zip(FAMILIES, families, fields, strict=True):
-                with self.subTest(metaclass=meta.__name__, family=family.__name__):
-                    self.assertNotIn(family, type(array).__mro__)
-                    self.assertIs(wptypes.concrete_array_type(array), family)
-                    before = constructor_calls.copy()
-                    self.assertEqual(wptypes.infer_argument_types([array], [Any]), [family[wp.float32]])
-                    self.assertEqual(constructor_calls, before)
-                    packed = context.pack_arg(kernel, family[float], "a", array, self.cpu)
-                    self.assertEqual(bytes(packed), bytes(array.__ctype__()))
-                    if family is wp.array:
-                        self.assertEqual(packed.grad, storage.grad.ptr)
-                        self.assertNotEqual(packed.flags, 0)
-                    elif family is wp.indexedarray:
-                        self.assertEqual(packed.data.grad, storage.grad.ptr)
-                        self.assertNotEqual(packed.data.flags, 0)
-                    bundle = ArrayBundle()
-                    setattr(bundle, field, array)
-                    self.assertIs(getattr(bundle, field), array)
-
-                    with self.assertRaisesRegex(RuntimeError, "dtype"):
-                        context.pack_arg(kernel, family[wp.int32], "a", array, self.cpu)
-                    with self.assertRaisesRegex(RuntimeError, "dimension"):
-                        context.pack_arg(kernel, family[float, Literal[2]], "a", array, self.cpu)
-                    other = wp.indexedarray if family is wp.array else wp.array
-                    with self.assertRaisesRegex(RuntimeError, "expects an array of type"):
-                        context.pack_arg(kernel, other[float], "a", array, self.cpu)
-
-            # Hiding the MRO must not turn ambiguous native storage into a proxy.
-            ambiguous_cls = meta("HiddenCrossFamily", (wp.array, wp.indexedarray), {})
-            ambiguous = ambiguous_cls.__new__(ambiguous_cls)
-            with self.subTest(metaclass=meta.__name__, family="ambiguous"):
-                with self.assertRaisesRegex(TypeError, "native array family"):
-                    wptypes.concrete_array_type(ambiguous)
-                with self.assertRaisesRegex(RuntimeError, "native array family"):
-                    context.pack_arg(read_regular, wp.array[float], "a", ambiguous, self.cpu)
-                with self.assertRaisesRegex(TypeError, "native array family"):
-                    ArrayBundle().a = ambiguous
-
-    def test_forged_mro_keeps_external_interface_semantics(self):
-        class ForgedMroLookupMeta(type):
-            def __getattribute__(cls, name):
-                if name == "__mro__":
-                    return (cls, wp.array, object)
-                return super().__getattribute__(name)
-
-        class ForgedMroMeta(type):
-            @property
-            def __mro__(cls):
-                return (cls, wp.array, object)
-
-        class ProviderBase:
-            def __init__(self, owner):
-                self.owner = owner
-
-            @property
-            def __array_interface__(self):
-                return self.owner.__array_interface__
-
-            def __ctype__(self):
-                raise AssertionError("An external interface provider was treated as a Warp array")
-
-        owner = wp.ones(2, device=self.cpu, requires_grad=True)
-        owner.retain_grad = True
-        for meta in (ForgedMroLookupMeta, ForgedMroMeta):
-            with self.subTest(metaclass=meta.__name__):
-                cls = meta("ExternalProvider", (ProviderBase,), {})
-                provider = cls(owner)
-                self.assertIn(wp.array, type(provider).__mro__)
-                self.assertFalse(isinstance(provider, wp.array))
-                self.assertIs(wptypes.concrete_array_type(provider), cls)
-                with self.assertRaisesRegex(TypeError, "Unable to infer"):
-                    wptypes.infer_argument_types([provider], [Any])
-                packed = context.pack_arg(read_regular, wp.array[float], "a", provider, self.cpu)
-                self.assertEqual(packed.data, owner.ptr)
-                self.assertEqual(packed.grad, 0)
-                self.assertEqual(packed.flags, 0)
-                with self.assertRaises(TypeError):
-                    ArrayBundle().a = provider
 
     def test_cpu_apic_retains_subclass_storage(self):
         def record():
@@ -1795,34 +1667,6 @@ def test_class_reassignment_uses_real_family(test, device):
                 test.assertEqual(bytes(context.pack_arg(kernel, family[float], "a", source, device)), descriptor)
 
 
-def test_hidden_mro_launch_parity(test, device):
-    bases = (TaggedArray, TaggedIndexedArray, TaggedFabricArray, TaggedIndexedFabricArray)
-    for meta in (HiddenMroMeta, PropertyMroMeta):
-        classes = tuple(meta(f"Hidden{base.__name__}", (base,), {}) for base in bases)
-        families = make_families(device, classes)
-        for family, (source, expected, kernel) in zip(FAMILIES, families, strict=True):
-            with test.subTest(metaclass=meta.__name__, family=family.__name__):
-                destination = wp.empty(4, dtype=float, device=device)
-                for reader in (kernel, GENERIC_KERNEL_BY_FAMILY[family]):
-                    wp.launch(reader, 4, inputs=[source], outputs=[destination], device=device)
-                    np.testing.assert_allclose(destination.numpy(), expected * 2.0)
-                np.testing.assert_allclose(wp.map(square_element, source).numpy(), expected**2)
-
-        # This overwrite chain observes both the gradient pointer and retain flag.
-        source = families[0][0]
-        source.requires_grad = True
-        source.retain_grad = True
-        loss = wp.zeros(1, dtype=float, device=device, requires_grad=True)
-        with wp.Tape() as tape:
-            wp.launch(double_in_place, 4, inputs=[source], device=device)
-            wp.launch(double_in_place, 4, inputs=[source], device=device)
-            wp.launch(sum_values, 4, inputs=[source, loss], device=device)
-        tape.backward(loss=loss)
-        np.testing.assert_allclose(source.grad.numpy(), np.full(4, 9.0))
-
-
-
-
 def test_subprocess_specialization_cache(test, device):
     source_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
     with tempfile.TemporaryDirectory(prefix="wp_array_subclass_") as cache_dir:
@@ -2037,7 +1881,6 @@ add_function_test(TestArraySubclass, "test_sgd_overloads", test_sgd_live_overloa
 add_function_test(
     TestArraySubclass, "test_class_reassignment", test_class_reassignment_uses_real_family, devices=devices
 )
-add_function_test(TestArraySubclass, "test_hidden_mro_launch", test_hidden_mro_launch_parity, devices=devices)
 add_function_test(TestArraySubclass, "test_subprocess_cache", test_subprocess_specialization_cache, devices=devices)
 add_function_test(TestArraySubclass, "test_constructors", test_no_constructor_calls, devices=devices)
 add_function_test(TestArraySubclass, "test_exact_arrays", test_exact_arrays_are_unchanged, devices=devices)

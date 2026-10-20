@@ -60,7 +60,7 @@ inspection, including arrays with `Sequence` mixins that would otherwise be iter
 optimizers before signature lookup, preventing allocation retention and cache pollution.
 
 Generic `launch()` already obtains canonical types from inference. It calls the
-internal `Kernel._add_overload()` directly, avoiding a second normalization pass
+internal `Kernel._add_normalized_overload()` directly, avoiding a second normalization pass
 on every launch. This internal method also keeps argument-name preparation after
 the overload-cache hit. Callers with live descriptors continue using `add_overload()`.
 

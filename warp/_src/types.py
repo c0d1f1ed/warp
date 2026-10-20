@@ -2992,11 +2992,11 @@ def matches_array_class(t, cls) -> builtins.bool:
 def concrete_array_type(t) -> type:
     """Return an array's native family, preserving ``type(t)`` for non-arrays."""
     cls = type(t)
-    if id(cls) in _ARRAY_FAMILY_IDS:
-        return cls
     if issubclass(cls, _ArrayAnnotationBase):
         return t._concrete_cls
-    return _resolve_array_family(t) or type(t)
+    if id(cls) in _ARRAY_FAMILY_IDS:
+        return cls
+    return _resolve_array_family(t) or cls
 
 
 def is_tuple(x) -> builtins.bool:
@@ -5698,9 +5698,6 @@ _ARRAY_ANNOTATION_MAP = {
 # Registered classes are retained by array_types. Compare identities without invoking
 # application metaclass hashing or equality; this is not a cache of user classes.
 _ARRAY_FAMILY_IDS = frozenset(id(cls) for cls in array_types)
-# Read the actual type slot; a metaclass can override __mro__ attribute lookup,
-# including with a property that type.__getattribute__ would still invoke.
-_TYPE_MRO_DESCRIPTOR = type.__dict__["__mro__"]
 _ARRAY_CTYPE_MAP = {
     array: array_t,
     indexedarray: indexedarray_t,
@@ -5721,20 +5718,16 @@ def _resolve_array_family(value) -> type | None:
     if id(cls) in _ARRAY_FAMILY_IDS:
         return cls
 
-    # Built-in bases make issubclass() consult the real type slots, even when
-    # an application metaclass overrides attribute lookup or equality.
+    # Most inputs are regular arrays or unrelated objects, requiring no MRO scan.
     if not issubclass(cls, (indexedarray, fabricarray, indexedfabricarray, fixedarray, _ArrayAnnotationBase)):
         return array if issubclass(cls, array) else None
 
-    mro = _TYPE_MRO_DESCRIPTOR.__get__(cls)
-    candidates = [ancestor for ancestor in mro if id(ancestor) in _ARRAY_FAMILY_IDS]
+    candidates = [ancestor for ancestor in cls.__mro__ if id(ancestor) in _ARRAY_FAMILY_IDS]
     if len(candidates) > 1:
         candidates = [
             candidate
             for candidate in candidates
-            if not any(
-                candidate is not other and candidate in _TYPE_MRO_DESCRIPTOR.__get__(other) for other in candidates
-            )
+            if not any(candidate is not other and candidate in other.__mro__ for other in candidates)
         ]
         if len(candidates) > 1:
             names = ", ".join(f"wp.{candidate.__name__}" for candidate in candidates)

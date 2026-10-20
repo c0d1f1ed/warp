@@ -1406,7 +1406,10 @@ class Kernel:
                 normalized_types.append(warp._src.types._normalize_array_argument_type(arg_type))
             except TypeError as error:
                 raise TypeError(f"Kernel '{self.key}', argument '{arg_name}': {error}") from error
-        arg_types = normalized_types
+        return self._add_normalized_overload(normalized_types)
+
+    def _add_normalized_overload(self, arg_types):
+        """Look up or create an overload from already normalized compiler types."""
 
         # get a type signature from the given argument types
         sig = warp._src.types.get_signature(arg_types, func_name=self.key)
@@ -1418,6 +1421,7 @@ class Kernel:
         # Log that we're creating a new overload (will trigger module hash change and recompilation)
         log_debug(f"[Kernel.add_overload] Creating new overload for {self.key}: {sig}")
 
+        arg_names = list(self.adj.arg_types.keys())
         template_types = list(self.adj.arg_types.values())
 
         # make sure all argument types are concrete and match the kernel parameters
@@ -11907,7 +11911,7 @@ def launch(
         # if it's a generic kernel, infer the required overload from the arguments
         if kernel.is_generic:
             fwd_types = kernel.infer_argument_types(fwd_args)
-            kernel = kernel.add_overload(fwd_types)
+            kernel = kernel._add_normalized_overload(fwd_types)
 
         # delay load modules, including new overload if needed
         module_exec = kernel.module.load(device, block_dim)
