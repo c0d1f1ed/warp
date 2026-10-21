@@ -299,6 +299,7 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
     from warp.tests.tile.test_tile_oob import TestTileOOB
     from warp.tests.tile.test_tile_print import TestTilePrint
     from warp.tests.tile.test_tile_reduce import TestTileReduce
+    from warp.tests.tile.test_tile_register_cpu import TestTileRegisterCpu
     from warp.tests.tile.test_tile_shared_memory import (
         TestTileSharedMemory,
         TestTileSharedMemoryMessages,
@@ -495,6 +496,7 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
         TestTileOOB,
         TestTilePrint,
         TestTileReduce,
+        TestTileRegisterCpu,
         TestTileSharedMemory,
         TestTileSharedMemoryMessages,
         TestTileSolve,

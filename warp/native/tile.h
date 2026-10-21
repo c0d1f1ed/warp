@@ -794,6 +794,20 @@ template <typename T, typename Shape_, bool BoundsCheck = true, bool Aligned = f
         return byte_offset_from_coord(coord) / sizeof(T);
     }
 
+    // A full tile with contiguous rows can be copied without per-element bounds
+    // checks. Outer strides may include padding or a different axis order.
+    inline CUDA_CALLABLE bool can_copy_contiguous_rows() const
+    {
+        bool valid = data.strides[Shape::N - 1] == int(sizeof(T));
+        WP_PRAGMA_UNROLL
+        for (int d = 0; d < Shape::N; ++d) {
+            valid &= offset[d] >= 0;
+            valid &= data.strides[d] >= 0;
+            valid &= int64_t(offset[d]) + Shape::dim(d) <= data.shape[d];
+        }
+        return valid;
+    }
+
     inline CUDA_CALLABLE bool index(const Coord& coord, int64_t& out) const
     {
         if constexpr (BoundsCheck) {
@@ -1138,11 +1152,47 @@ template <typename T, typename L> struct tile_register_t {
 
     template <typename Global> inline CUDA_CALLABLE void copy_to_global(const Global& dest)
     {
+#if !defined(__CUDA_ARCH__)
+        // One CPU thread owns all elements in the standard register layout.
+        // Expose contiguous rows so LLVM can emit packed, unmasked stores.
+        if constexpr (
+            WP_TILE_BLOCK_DIM == 1 && is_same<Layout, tile_layout_register_t<typename Layout::Shape>>::value
+        ) {
+            if (dest.can_copy_contiguous_rows()) {
+                using Shape = typename Layout::Shape;
+                constexpr int columns = Shape::dim(Shape::N - 1);
+                for (int row = 0; row < Shape::size() / columns; ++row) {
+                    auto coord = Layout::coord_from_linear(row * columns);
+                    T* row_data = dest.data.data + dest.index_from_coord(coord);
+                    for (int col = 0; col < columns; ++col)
+                        row_data[col] = data[row * columns + col];
+                }
+                return;
+            }
+        }
+#endif
         apply([&](int reg, auto c) { dest.store(c, data[reg]); });
     }
 
     template <typename Global> inline CUDA_CALLABLE void copy_from_global(const Global& src)
     {
+#if !defined(__CUDA_ARCH__)
+        if constexpr (
+            WP_TILE_BLOCK_DIM == 1 && is_same<Layout, tile_layout_register_t<typename Layout::Shape>>::value
+        ) {
+            if (src.can_copy_contiguous_rows()) {
+                using Shape = typename Layout::Shape;
+                constexpr int columns = Shape::dim(Shape::N - 1);
+                for (int row = 0; row < Shape::size() / columns; ++row) {
+                    auto coord = Layout::coord_from_linear(row * columns);
+                    const T* row_data = src.data.data + src.index_from_coord(coord);
+                    for (int col = 0; col < columns; ++col)
+                        data[row * columns + col] = row_data[col];
+                }
+                return;
+            }
+        }
+#endif
         apply([&](int reg, auto c) { data[reg] = src.load(c); });
     }
 
